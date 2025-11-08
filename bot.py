@@ -5,9 +5,9 @@ import telebot
 from datetime import datetime
 from pytz import timezone
 from dotenv import load_dotenv
-import atexit
 import requests
 import logging
+import signal
 
 
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s', filename='logs', filemode='w')
@@ -159,15 +159,16 @@ def worker():
 
 
 # Save wallets to file on exit
-def save_wallets():
+def save_wallets(signum, frame):
     try:
         with open(WALLETS_FILE, 'w') as f:
             f.write('\n'.join(wallet_positions.keys()))
     except Exception as e:
         logger.error(f"exception while saving wallets: {e}")
+    raise SystemExit('terminating')
 
 
-atexit.register(save_wallets)
+signal.signal(signal.SIGTERM, save_wallets)
 threading.Thread(target=worker, daemon=True).start()
 while True:
     try:
