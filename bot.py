@@ -16,15 +16,27 @@ logger = logging.getLogger(__name__)
 
 
 load_dotenv()
+
 TOKEN = os.getenv('BOT_TOKEN')
+
+# List of users allowed to interact with the bot
 CHAT_IDS = list(map(int, os.getenv('CHAT_IDS').split(',')))
+
 TIMEZONE = timezone('Europe/Moscow')
+
 bot = telebot.TeleBot(TOKEN, parse_mode='Markdown')
+
+# Time of the last update of all wallets positions
 last_updated = datetime.now()
+
+# Connect each wallet to its last known positions
 wallet_positions = {}
 
+WALLETS_FILE = 'wallets.txt'
 
-with open('wallets.txt', 'r') as f:
+
+# Load wallets from file while starting up
+with open(WALLETS_FILE, 'r') as f:
     for line in f:
         wallet = line.strip()
         if wallet:
@@ -48,33 +60,44 @@ def remove_wallet(chat_id, wallet):
 
 
 @bot.message_handler(func=lambda m: True)
-def echo(m):
+def reply(m):
+
+    # ignore messages from unauthorized users
     if m.chat.id not in CHAT_IDS:
         return
+    
     if m.text.startswith('/addwallet '):
         wallet = m.text.split(' ')[1]
         add_wallet(m.chat.id, wallet)
+
     elif m.text.startswith('/removewallet '):
         wallet = m.text.split(' ')[1]
         remove_wallet(m.chat.id, wallet)
+
     else:
-        message = f'Last updated: {str(last_updated.astimezone(TIMEZONE))}'
+        message = f'Last updated: {str(last_updated.astimezone(TIMEZONE))}\n\n'
+        message += 'Tracked wallets:\n'
+        message += '\n'.join(wallet_positions.keys())
         bot.send_message(m.chat.id, message)
 
 
+# Convert data from API to a more convenient format
 def format_position(pos):
     return {
         'ticker': pos['position']['coin'],
         'size': pos['position']['szi'],
         'leverage': pos['position']['leverage']['value'],
-        'direction': 'Short' if pos['position']['szi'][0] == '-' else 'Long'
+        'leverage_type': pos['position']['leverage']['type'],
+        'direction': 'Short' if pos['position']['szi'][0] == '-' else 'Long',
+        'entry_price': pos['position']['entryPx'],
     }
 
 
-def create_table(positions):
-    t = PrettyTable(['Ticker', 'Direction', 'Leverage', 'Size'])
+# Format positions as a table
+def table(positions):
+    t = PrettyTable(['Ticker', 'Direction', 'Leverage', 'Leverage Type', 'Size', 'Entry Price'])
     for pos in positions:
-        t.add_row([pos['ticker'], pos['direction'], pos['leverage'], pos['size']])
+        t.add_row([pos['ticker'], pos['direction'], pos['leverage'], pos['leverage_type'], pos['size'], pos['entry_price']])
     t.align = 'l'
     return t
 
@@ -102,24 +125,23 @@ def worker():
                 if positions == []:
                     wallet_positions[wallet] = new_positions
                 elif new_positions != positions:
-                    t = create_table(new_positions)
+                    t = table(new_positions)
                     message = f'*Positions changed!*\n`{t}`\nhttps://hyperdash.info/trader/{wallet}'
                     send_everyone(message)
                     wallet_positions[wallet] = new_positions
+                sleep(1)
             last_updated = datetime.now()
         except Exception as e:
             logger.error(f"exception in worker: {e}")
-        finally:
-            sleep(5)
 
 
+# Save wallets to file on exit
 def save_wallets():
     try:
-        with open('wallets.txt', 'w') as f:
+        with open(WALLETS_FILE, 'w') as f:
             f.write('\n'.join(wallet_positions.keys()))
     except Exception as e:
         logger.error(f"exception while saving wallets: {e}")
-        sleep(5)
 
 
 atexit.register(save_wallets)
