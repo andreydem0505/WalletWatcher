@@ -5,9 +5,11 @@ import telebot
 from datetime import datetime
 from pytz import timezone
 from dotenv import load_dotenv
-import requests
 import logging
 import signal
+import atexit
+from serialization import load_wallets, save_wallets
+from data_fetcher import fetch_open_positions, fetch_last_trade
 
 
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s', filename='logs', filemode='w')
@@ -28,23 +30,12 @@ bot = telebot.TeleBot(TOKEN, parse_mode='Markdown')
 # Time of the last update of all wallets positions
 last_updated = datetime.now()
 
-# Connect each wallet to its last known positions
-wallet_positions = {}
-
-WALLETS_FILE = 'wallets.txt'
-
-
-# Load wallets from file while starting up
-with open(WALLETS_FILE, 'r') as f:
-    for line in f:
-        wallet = line.strip()
-        if wallet:
-            wallet_positions[wallet] = []
+wallet_positions = load_wallets()
 
 
 def add_wallet(chat_id, wallet):
     if wallet not in wallet_positions:
-        wallet_positions[wallet] = []
+        wallet_positions[wallet] = None
         send_everyone(f'Wallet {wallet} added')
     else:
         bot.send_message(chat_id, f'Wallet {wallet} is already being tracked')
@@ -80,24 +71,13 @@ def reply(m):
         bot.send_message(m.chat.id, message)
 
 
-# Convert data from API to a more convenient format
-def format_position(pos):
-    return {
-        'ticker': pos['position']['coin'],
-        'size': pos['position']['szi'],
-        'leverage': pos['position']['leverage']['value'],
-        'leverage_type': pos['position']['leverage']['type'],
-        'direction': 'Short' if pos['position']['szi'][0] == '-' else 'Long',
-        'entry_price': pos['position']['entryPx'],
-    }
-
-
 def send_everyone(message):
-    try:
-        for chat_id in CHAT_IDS:
+    for chat_id in CHAT_IDS:
+        try:
             bot.send_message(chat_id, message)
-    except Exception as e:
-        logger.error(f"exception while sending message: {e}")
+        except Exception as e:
+            logger.error(f"exception while sending message: {e}")
+            continue
 
 
 def on_change_message(wallet, positions, last_trade):
@@ -113,41 +93,13 @@ def on_change_message(wallet, positions, last_trade):
     return message
 
 
-def fetch_positions_data(wallet):
-    payload = {
-        "type": "clearinghouseState",
-        "user": wallet
-    }
-    r = requests.post('https://api.hyperliquid.xyz/info', json=payload)
-    data = r.json()['assetPositions']
-    return list(map(format_position, data))
-
-
-def fetch_last_trade(wallet):
-    payload = {
-        "type": "userFills",
-        "user": wallet,
-        "aggregateByTime": True
-    }
-    r = requests.post('https://api.hyperliquid.xyz/info', json=payload)
-    data = r.json()[0]
-    return {
-        'ticker': data['coin'],
-        'price': data['px'],
-        'size': data['sz'],
-        'action': data['dir'],
-    }
-
-
 def worker():
     global last_updated, wallet_positions
     while True:
         try:
             for wallet, positions in wallet_positions.items():
-                new_positions = fetch_positions_data(wallet)
-                if positions == []:
-                    wallet_positions[wallet] = new_positions
-                elif new_positions != positions:
+                new_positions = fetch_open_positions(wallet)
+                if new_positions != positions:
                     last_trade = fetch_last_trade(wallet)
                     message = on_change_message(wallet, new_positions, last_trade)
                     send_everyone(message)
@@ -158,17 +110,14 @@ def worker():
             logger.error(f"exception in worker: {e}")
 
 
-# Save wallets to file on exit
-def save_wallets(signum, frame):
-    try:
-        with open(WALLETS_FILE, 'w') as f:
-            f.write('\n'.join(wallet_positions.keys()))
-    except Exception as e:
-        logger.error(f"exception while saving wallets: {e}")
+def on_exit(signum, frame):
+    save_wallets(wallet_positions)
     raise SystemExit('terminating')
 
 
-signal.signal(signal.SIGTERM, save_wallets)
+atexit.register(save_wallets, wallet_positions)
+signal.signal(signal.SIGTERM, on_exit)
+
 threading.Thread(target=worker, daemon=True).start()
 while True:
     try:
