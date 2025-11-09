@@ -99,7 +99,9 @@ def worker():
         try:
             for wallet, positions in wallet_positions.items():
                 new_positions = fetch_open_positions(wallet)
-                if new_positions != positions:
+                if positions is None:
+                    wallet_positions[wallet] = new_positions
+                elif new_positions != positions:
                     last_trade = fetch_last_trade(wallet)
                     message = on_change_message(wallet, new_positions, last_trade)
                     send_everyone(message)
