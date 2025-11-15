@@ -8,8 +8,10 @@ from dotenv import load_dotenv
 import logging
 import signal
 import atexit
+from models import Position, Trade
 from serialization import load_wallets, save_wallets
 from data_fetcher import fetch_open_positions, fetch_last_trade
+from format import format_number
 
 
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s', filename='logs', filemode='w')
@@ -23,6 +25,11 @@ TOKEN = os.getenv('BOT_TOKEN')
 # List of users allowed to interact with the bot
 CHAT_IDS = list(map(int, os.getenv('CHAT_IDS').split(',')))
 
+ADMIN_ID = int(os.getenv('ADMIN_ID'))
+
+# Possible values: PROD, TEST
+MODE = os.getenv('MODE')
+
 TIMEZONE = timezone('Europe/Moscow')
 
 bot = telebot.TeleBot(TOKEN, parse_mode='Markdown')
@@ -33,7 +40,7 @@ last_updated = datetime.now()
 wallet_positions = load_wallets()
 
 
-def add_wallet(chat_id, wallet):
+def add_wallet(chat_id: int, wallet: str):
     if wallet not in wallet_positions:
         wallet_positions[wallet] = None
         send_everyone(f'Wallet {wallet} added')
@@ -41,7 +48,7 @@ def add_wallet(chat_id, wallet):
         bot.send_message(chat_id, f'Wallet {wallet} is already being tracked')
 
 
-def remove_wallet(chat_id, wallet):
+def remove_wallet(chat_id: int, wallet: str):
     if wallet in wallet_positions:
         del wallet_positions[wallet]
         send_everyone(chat_id, f'Wallet {wallet} removed')
@@ -50,7 +57,7 @@ def remove_wallet(chat_id, wallet):
 
 
 @bot.message_handler(func=lambda m: True)
-def reply(m):
+def reply(m: telebot.types.Message):
 
     # ignore messages from unauthorized users
     if m.chat.id not in CHAT_IDS:
@@ -71,7 +78,10 @@ def reply(m):
         bot.send_message(m.chat.id, message)
 
 
-def send_everyone(message):
+def send_everyone(message: str):
+    if MODE == 'TEST':
+        bot.send_message(ADMIN_ID, message)
+        return
     for chat_id in CHAT_IDS:
         try:
             bot.send_message(chat_id, message)
@@ -80,15 +90,16 @@ def send_everyone(message):
             continue
 
 
-def on_change_message(wallet, positions, last_trade):
-    message = f"❗️ *{last_trade['ticker']} {last_trade['action']}* ❗️"
-    message += f"\nSize: {last_trade['size']}"
-    message += f"\nPrice: {last_trade['price']}\n"
+def on_change_message(wallet: str, positions: list[Position], last_trade: Trade) -> str:
+    volume = int(float(last_trade.size) * float(last_trade.price))
+    message = f"❗️ *{last_trade.ticker} {last_trade.action}* ❗️"
+    message += f"\nVolume: ${format_number(volume)}"
+    message += f"\nPrice: {last_trade.price}\n"
     message += '\n*Current positions:*\n'
     for pos in positions:
-        message += f"\n*{pos['ticker']} {pos['direction']} {pos['leverage']} {pos['leverage_type']}*"
-        message += f"\nSize: {pos['size']}"
-        message += f"\nEntry Price: {pos['entry_price']}\n"
+        message += f"\n*{pos.ticker} {pos.direction} {pos.leverage} {pos.leverage_type}*"
+        message += f"\nVolume: ${format_number(pos.volume)}"
+        message += f"\nEntry Price: {pos.entry_price}\n"
     message += f'\nhttps://hyperdash.info/trader/{wallet}'
     return message
 
@@ -113,6 +124,7 @@ def worker():
 
 
 def on_exit(signum, frame):
+    send_everyone('Bot is shutting down')
     save_wallets(wallet_positions)
     raise SystemExit('terminating')
 
@@ -120,7 +132,10 @@ def on_exit(signum, frame):
 atexit.register(save_wallets, wallet_positions)
 signal.signal(signal.SIGTERM, on_exit)
 
+send_everyone('Bot restarted')
+
 threading.Thread(target=worker, daemon=True).start()
+
 while True:
     try:
         bot.infinity_polling(timeout=60, long_polling_timeout=60)

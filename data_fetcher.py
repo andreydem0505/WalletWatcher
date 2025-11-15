@@ -1,21 +1,12 @@
 import requests
+from format import format_position, format_trade
+from models import Position, Trade
 
 
 API_URL = 'https://api.hyperliquid.xyz/info'
 
 
-def format_position(pos):
-    return {
-        'ticker': pos['position']['coin'],
-        'size': pos['position']['szi'],
-        'leverage': pos['position']['leverage']['value'],
-        'leverage_type': pos['position']['leverage']['type'],
-        'direction': 'Short' if pos['position']['szi'][0] == '-' else 'Long',
-        'entry_price': pos['position']['entryPx'],
-    }
-
-
-def fetch_open_positions(wallet):
+def fetch_open_positions(wallet: str) -> list[Position]:
     payload = {
         "type": "clearinghouseState",
         "user": wallet
@@ -25,7 +16,7 @@ def fetch_open_positions(wallet):
     return list(map(format_position, data))
 
 
-def fetch_last_trade(wallet):
+def fetch_last_trade(wallet: str) -> Trade:
     payload = {
         "type": "userFills",
         "user": wallet,
@@ -33,9 +24,4 @@ def fetch_last_trade(wallet):
     }
     r = requests.post(API_URL, json=payload)
     data = r.json()[0]
-    return {
-        'ticker': data['coin'],
-        'price': data['px'],
-        'size': data['sz'],
-        'action': data['dir'],
-    }
+    return format_trade(data)
