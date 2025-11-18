@@ -87,7 +87,6 @@ def send_everyone(message: str):
             bot.send_message(chat_id, message)
         except Exception as e:
             logger.error(f"exception while sending message: {e}")
-            continue
 
 
 def on_change_message(wallet: str, positions: list[Position], last_trade: Trade) -> str:
@@ -121,6 +120,7 @@ def worker():
             last_updated = datetime.now()
         except Exception as e:
             logger.error(f"exception in worker: {e}")
+            sleep(10)
 
 
 def on_exit(signum, frame):
