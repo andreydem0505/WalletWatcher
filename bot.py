@@ -32,7 +32,7 @@ MODE = os.getenv('MODE')
 
 TIMEZONE = timezone('Europe/Moscow')
 
-TRADER_URL = 'https://legacy.hyperdash.info/trader/'
+TRADER_URL = 'https://legacy.hyperdash.com/trader/'
 
 bot = telebot.TeleBot(TOKEN, parse_mode='Markdown')
 
@@ -53,7 +53,7 @@ def add_wallet(chat_id: int, wallet: str):
 def remove_wallet(chat_id: int, wallet: str):
     if wallet in wallet_positions:
         del wallet_positions[wallet]
-        send_everyone(chat_id, f'Wallet {wallet} removed')
+        send_everyone(f'Wallet {wallet} removed')
     else:
         bot.send_message(chat_id, f'Wallet {wallet} is not being tracked')
 
