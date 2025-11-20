@@ -32,6 +32,8 @@ MODE = os.getenv('MODE')
 
 TIMEZONE = timezone('Europe/Moscow')
 
+TRADER_URL = 'https://legacy.hyperdash.info/trader/'
+
 bot = telebot.TeleBot(TOKEN, parse_mode='Markdown')
 
 # Time of the last update of all wallets positions
@@ -99,7 +101,7 @@ def on_change_message(wallet: str, positions: list[Position], last_trade: Trade)
         message += f"\n*{pos.ticker} {pos.direction} {pos.leverage} {pos.leverage_type}*"
         message += f"\nVolume: ${format_number(pos.volume)}"
         message += f"\nEntry Price: {pos.entry_price}\n"
-    message += f'\nhttps://hyperdash.info/trader/{wallet}'
+    message += TRADER_URL + wallet
     return message
 
 
