@@ -28,4 +28,5 @@ def format_trade(data: dict) -> Trade:
         price=data['px'],
         size=data['sz'],
         action=data['dir'],
+        timestamp=data['time'],
     )

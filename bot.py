@@ -8,8 +8,8 @@ from dotenv import load_dotenv
 import logging
 import signal
 import atexit
-from models import Position, Trade
-from serialization import load_wallets, save_wallets
+from models import Account
+from serialization import load_accounts, save_wallets
 from data_fetcher import fetch_open_positions, fetch_last_trade
 from format import format_number
 
@@ -39,20 +39,20 @@ bot = telebot.TeleBot(TOKEN, parse_mode='Markdown')
 # Time of the last update of all wallets positions
 last_updated = datetime.now()
 
-wallet_positions = load_wallets()
+accounts = load_accounts()
 
 
 def add_wallet(chat_id: int, wallet: str):
-    if wallet not in wallet_positions:
-        wallet_positions[wallet] = None
+    if wallet not in accounts:
+        accounts[wallet] = Account()
         send_everyone(f'Wallet {wallet} added')
     else:
         bot.send_message(chat_id, f'Wallet {wallet} is already being tracked')
 
 
 def remove_wallet(chat_id: int, wallet: str):
-    if wallet in wallet_positions:
-        del wallet_positions[wallet]
+    if wallet in accounts:
+        del accounts[wallet]
         send_everyone(f'Wallet {wallet} removed')
     else:
         bot.send_message(chat_id, f'Wallet {wallet} is not being tracked')
@@ -76,49 +76,69 @@ def reply(m: telebot.types.Message):
     else:
         message = f'Last updated: {str(last_updated.astimezone(TIMEZONE))}\n\n'
         message += 'Tracked wallets:\n'
-        message += '\n'.join(map(lambda x: f"`{x}`", wallet_positions.keys()))
+        message += '\n'.join([f"`{k}` {v.tag if v.tag else ''}" for k, v in accounts.items()])
         bot.send_message(m.chat.id, message)
 
 
-def send_everyone(message: str):
+def send_everyone(message: str) -> list[int]:
     if MODE == 'TEST':
-        bot.send_message(ADMIN_ID, message)
-        return
+        msg = bot.send_message(ADMIN_ID, message)
+        return [(ADMIN_ID, msg.message_id)]
+    message_ids = []
     for chat_id in CHAT_IDS:
         try:
-            bot.send_message(chat_id, message)
+            msg = bot.send_message(chat_id, message)
+            message_ids.append((chat_id, msg.message_id))
         except Exception as e:
             logger.error(f"exception while sending message: {e}")
+    return message_ids
 
 
-def on_change_message(wallet: str, positions: list[Position], last_trade: Trade) -> str:
+def on_change_message(wallet: str, account: Account) -> str:
+    last_trade = account.last_trade
     volume = int(float(last_trade.size) * float(last_trade.price))
     message = f"❗️ *{last_trade.ticker} {last_trade.action}* ❗️"
     message += f"\nVolume: ${format_number(volume)}"
     message += f"\nPrice: {last_trade.price}\n"
     message += '\n*Current positions:*\n'
-    for pos in positions:
+    for pos in account.positions:
         message += f"\n*{pos.ticker} {pos.direction} {pos.leverage} {pos.leverage_type}*"
         message += f"\nVolume: ${format_number(pos.volume)}"
+        if pos.delta != 0:
+            sign = '+' if pos.delta > 0 else ''
+            message += f" __({sign}${format_number(pos.delta)})__ ❗️"
         message += f"\nEntry Price: {pos.entry_price}\n"
-    message += TRADER_URL + wallet
+    for closed_ticker in account.closed_positions:
+        message += f"\n*{closed_ticker} Position Closed* ❗️\n"
+    message += '\n' + TRADER_URL + wallet
     return message
 
 
+def edit_message(message_ids: list[tuple[int, int]], text: str):
+    for chat_id, message_id in message_ids:
+        try:
+            bot.edit_message_text(chat_id=chat_id, message_id=message_id, text=text)
+        except Exception as e:
+            logger.error(f"exception while editing message: {e}")
+
+
 def worker():
-    global last_updated, wallet_positions
+    global last_updated, accounts
     while True:
         try:
-            for wallet, positions in wallet_positions.items():
+            for wallet, account in accounts.items():
                 new_positions = fetch_open_positions(wallet)
-                if positions is None:
-                    wallet_positions[wallet] = new_positions
-                elif new_positions != positions:
+                if account.positions is None:
+                    accounts[wallet].positions = new_positions
+                elif new_positions != account.positions:
                     last_trade = fetch_last_trade(wallet)
-                    message = on_change_message(wallet, new_positions, last_trade)
-                    send_everyone(message)
-                    wallet_positions[wallet] = new_positions
-                sleep(1)
+                    account.update(last_trade, new_positions)
+                    message = on_change_message(wallet, account)
+                    if account.need_new_message:
+                        account.message_ids = send_everyone(message)
+                    else:
+                        edit_message(account.message_ids, message)
+                sleep(0.5)
             last_updated = datetime.now()
         except Exception as e:
             logger.error(f"exception in worker: {e}")
@@ -127,11 +147,11 @@ def worker():
 
 def on_exit(signum, frame):
     send_everyone('Bot is shutting down')
-    save_wallets(wallet_positions)
+    save_wallets(accounts)
     raise SystemExit('terminating')
 
 
-atexit.register(save_wallets, wallet_positions)
+atexit.register(save_wallets, accounts)
 signal.signal(signal.SIGTERM, on_exit)
 
 send_everyone('Bot restarted')
