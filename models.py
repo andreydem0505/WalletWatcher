@@ -1,11 +1,19 @@
 def more_than_hour_ago(new_time: int, old_time: int) -> bool:
-    return (new_time - old_time) / 3600000 >= 1
+    return new_time - old_time > 3600000
 
 
 class TradeAction:
     def __init__(self, ticker, action):
         self.ticker = ticker
         self.action = action
+    
+    def __eq__(self, other):
+        if not isinstance(other, TradeAction):
+            return False
+        return self.ticker == other.ticker and self.action == other.action
+    
+    def __hash__(self):
+        return hash((self.ticker, self.action))
 
 
 class PositionStampKey:
@@ -14,6 +22,17 @@ class PositionStampKey:
         self.direction = direction
         self.leverage = leverage
         self.leverage_type = leverage_type
+    
+    def __eq__(self, other):
+        if not isinstance(other, PositionStampKey):
+            return False
+        return (self.ticker == other.ticker and
+                self.direction == other.direction and
+                self.leverage == other.leverage and
+                self.leverage_type == other.leverage_type)
+    
+    def __hash__(self):
+        return hash((self.ticker, self.direction, self.leverage, self.leverage_type))
 
 
 class Position:
