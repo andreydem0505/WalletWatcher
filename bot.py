@@ -125,7 +125,7 @@ def on_change_message(wallet: str, account: Account) -> str:
     message += f"\n`{account.tag if account.tag else wallet}`"
     message += f"\nVolume: ${format_number(volume)}"
     message += f"\nPrice: {last_trade.price}\n"
-    message += '\n*Current positions:*\n'
+    message += '\n*Current positions with last hour changes:*\n'
     for pos in account.positions:
         message += f"\n*{pos.ticker} {pos.direction} {pos.leverage} {pos.leverage_type}*"
         message += f"\nVolume: ${format_number(pos.volume)}"
@@ -163,7 +163,7 @@ def worker():
                         account.message_ids = send_everyone(message)
                     else:
                         edit_message(account.message_ids, message)
-                sleep(0.5)
+                sleep(0.2)
             last_updated = datetime.now()
         except Exception as e:
             logger.error(f"exception in worker: {e}")
