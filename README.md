@@ -1,6 +1,6 @@
 # Hyperliquid Wallets Monitor 🐳
 
-### Should be considered as MVP. Any contribution is appreciated. ⭐️
+### This should be considered an MVP. Any contribution is appreciated. ⭐️
 
 The bot monitors new trades of specified Hyperliquid accounts and sends alerts when detected.
 
