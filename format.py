@@ -13,7 +13,7 @@ def format_number(num: int) -> str:
 def format_position(data: dict) -> Position:
     return Position(
         ticker=data['position']['coin'],
-        size=data['position']['szi'],
+        size=float(data['position']['szi']),
         leverage=data['position']['leverage']['value'],
         leverage_type=data['position']['leverage']['type'],
         direction='Short' if data['position']['szi'][0] == '-' else 'Long',

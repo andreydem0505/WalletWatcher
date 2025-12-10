@@ -1,13 +1,13 @@
 # Hyperliquid Wallets Monitor 🐳
 
-### Minimum Viable Product. Any contribution is appreciated. ⭐️
+### Minimum Viable Product. Any contributions are appreciated. ⭐️
 
 The bot monitors new trades of specified Hyperliquid accounts and sends alerts when detected.
 
 ![Example of the alert](message.png)
 
 ### Message Structure
-When positions of one of the specified wallets change, the bot queries the most recent fill (for example, HYPE Open Long). If there are no such fills for this account in the last hour, a new message will be sent. If the account has such fills recently, the last message for this account will be edited.
+When positions of one of the specified wallets change, the bot queries the most recent fill (for example, HYPE Open Long). If there have been no similar fills for this account in the last hour, a new message is sent. Otherwise, the last message for this account is edited to prevent spam.
 
 The message contains:
 - Last discovered fill
@@ -29,8 +29,8 @@ The message contains:
    Authorized users can:  
    - Add wallets: `/addwallet 0x...`  
    - Remove wallets: `/removewallet 0x...`  
-   - Set a tag to a wallet for identification: `/settag 0x... some_tag`
-   - Check status: Send any message to get the last update time and monitored wallets list
+   - Set a tag for a wallet for identification: `/settag 0x... some_tag`
+   - Check status: Send any message to get the last update time and the monitored wallets list
 
 ### Environment Configuration (.env)
 ```bash

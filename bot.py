@@ -8,7 +8,7 @@ from dotenv import load_dotenv
 import logging
 import signal
 import atexit
-from models import Account
+from models import Account, MessageId
 from serialization import load_accounts, save_wallets
 from data_fetcher import fetch_open_positions, fetch_last_trade
 from format import format_number
@@ -104,15 +104,15 @@ def reply(m: telebot.types.Message):
         bot.send_message(m.chat.id, message)
 
 
-def send_everyone(message: str) -> list[int]:
+def send_everyone(message: str) -> list[MessageId]:
     if MODE == 'TEST':
         msg = bot.send_message(ADMIN_ID, message)
-        return [(ADMIN_ID, msg.message_id)]
+        return [MessageId(ADMIN_ID, msg.message_id)]
     message_ids = []
     for chat_id in CHAT_IDS:
         try:
             msg = bot.send_message(chat_id, message)
-            message_ids.append((chat_id, msg.message_id))
+            message_ids.append(MessageId(chat_id, msg.message_id))
         except Exception as e:
             logger.error(f"exception while sending message: {e}")
     return message_ids
@@ -139,10 +139,10 @@ def on_change_message(wallet: str, account: Account) -> str:
     return message
 
 
-def edit_message(message_ids: list[tuple[int, int]], text: str):
-    for chat_id, message_id in message_ids:
+def edit_message(message_ids: list[MessageId], text: str):
+    for message_id in message_ids:
         try:
-            bot.edit_message_text(chat_id=chat_id, message_id=message_id, text=text)
+            bot.edit_message_text(chat_id=message_id.chat_id, message_id=message_id.message_id, text=text)
         except Exception as e:
             logger.error(f"exception while editing message: {e}")
 

@@ -35,6 +35,12 @@ class PositionStampKey:
         return hash((self.ticker, self.direction, self.leverage, self.leverage_type))
 
 
+class PositionStampValue:
+    def __init__(self, size, volume):
+        self.size = size
+        self.volume = volume
+
+
 class Position:
     def __init__(self, ticker, direction, leverage, leverage_type, size, entry_price, volume):
         self.ticker = ticker
@@ -65,6 +71,12 @@ class Trade:
         self.timestamp = timestamp
 
 
+class MessageId:
+    def __init__(self, chat_id: int, message_id: int):
+        self.chat_id = chat_id
+        self.message_id = message_id
+
+
 class Account:
     def __init__(self, tag=None):
         if tag is None or len(tag) == 0:
@@ -73,11 +85,11 @@ class Account:
             self.tag = tag
         self.positions: list[Position] = None
         self.last_actions: dict[TradeAction, int] = {} # maps trade action to timestamp
-        self.stamp: dict[PositionStampKey, int] = {} # maps position stamp to volume
+        self.stamp: dict[PositionStampKey, PositionStampValue] = {}
         self.closed_positions: list[str] = [] # list of tickers
         self.need_new_message = False
         self.last_trade = None
-        self.message_ids: list[tuple[int, int]] = []
+        self.message_ids: list[MessageId] = []
     
     def update(self, last_trade: Trade, new_positions: list[Position]):
         self.last_trade = last_trade
@@ -107,7 +119,7 @@ class Account:
                 direction=pos.direction,
                 leverage=pos.leverage,
                 leverage_type=pos.leverage_type
-            )] = pos.volume
+            )] = PositionStampValue(size=pos.size, volume=pos.volume)
     
     def __calculate_delta(self):
         local_stamp = self.stamp.copy()
@@ -119,10 +131,10 @@ class Account:
                 leverage=pos.leverage,
                 leverage_type=pos.leverage_type
             )
-            if pos_stamp_key in local_stamp:
-                pos.delta = pos.volume - local_stamp[pos_stamp_key]
+            if pos_stamp_key in local_stamp and local_stamp[pos_stamp_key].size != pos.size:
+                pos.delta = pos.volume - local_stamp[pos_stamp_key].volume
                 del local_stamp[pos_stamp_key]
             else:
                 pos.delta = 0
-        for pos_stamp_key, _ in local_stamp.items():
+        for pos_stamp_key in local_stamp.keys():
             self.closed_positions.append(pos_stamp_key.ticker)
