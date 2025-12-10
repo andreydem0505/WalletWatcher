@@ -58,6 +58,17 @@ def remove_wallet(chat_id: int, wallet: str):
         bot.send_message(chat_id, f'Wallet {wallet} is not being tracked')
 
 
+def set_tag(chat_id: int, wallet: str, tag: str):
+    if ';' in tag:
+        bot.send_message(chat_id, 'Tag cannot contain semicolon character')
+        return
+    if wallet in accounts:
+        accounts[wallet].tag = tag
+        send_everyone(f'Wallet {wallet} tag set to {tag}')
+    else:
+        bot.send_message(chat_id, f'Wallet {wallet} is not being tracked')
+
+
 @bot.message_handler(func=lambda m: True)
 def reply(m: telebot.types.Message):
 
@@ -66,17 +77,30 @@ def reply(m: telebot.types.Message):
         return
     
     if m.text.startswith('/addwallet '):
-        wallet = m.text.split(' ')[1]
-        add_wallet(m.chat.id, wallet)
+        try:
+            wallet = m.text.split(' ')[1]
+            add_wallet(m.chat.id, wallet)
+        except IndexError:
+            bot.send_message(m.chat.id, 'Usage: /addwallet <wallet>')
 
     elif m.text.startswith('/removewallet '):
-        wallet = m.text.split(' ')[1]
-        remove_wallet(m.chat.id, wallet)
+        try:
+            wallet = m.text.split(' ')[1]
+            remove_wallet(m.chat.id, wallet)
+        except IndexError:
+            bot.send_message(m.chat.id, 'Usage: /removewallet <wallet>')
 
+    elif m.text.startswith('/settag '):
+        try:
+            _, wallet, tag = m.text.split(' ')
+            set_tag(m.chat.id, wallet, tag)
+        except ValueError:
+            bot.send_message(m.chat.id, 'Usage: /settag <wallet> <tag>')
+    
     else:
         message = f'Last updated: {str(last_updated.astimezone(TIMEZONE))}\n\n'
         message += 'Tracked wallets:\n'
-        message += '\n'.join([f"`{k}` {v.tag if v.tag else ''}" for k, v in accounts.items()])
+        message += '\n'.join([f"`{k}` {f'({v.tag})' if v.tag else ''}" for k, v in accounts.items()])
         bot.send_message(m.chat.id, message)
 
 
@@ -98,6 +122,7 @@ def on_change_message(wallet: str, account: Account) -> str:
     last_trade = account.last_trade
     volume = int(float(last_trade.size) * float(last_trade.price))
     message = f"❗️ *{last_trade.ticker} {last_trade.action}* ❗️"
+    message += f"\n`{account.tag if account.tag else wallet}`"
     message += f"\nVolume: ${format_number(volume)}"
     message += f"\nPrice: {last_trade.price}\n"
     message += '\n*Current positions:*\n'
@@ -106,10 +131,10 @@ def on_change_message(wallet: str, account: Account) -> str:
         message += f"\nVolume: ${format_number(pos.volume)}"
         if pos.delta != 0:
             sign = '+' if pos.delta > 0 else ''
-            message += f" __({sign}${format_number(pos.delta)})__ ❗️"
+            message += f" _({sign}${format_number(pos.delta)})_ 👈"
         message += f"\nEntry Price: {pos.entry_price}\n"
     for closed_ticker in account.closed_positions:
-        message += f"\n*{closed_ticker} Position Closed* ❗️\n"
+        message += f"\n*{closed_ticker} Position Closed* ❌\n"
     message += '\n' + TRADER_URL + wallet
     return message
 
