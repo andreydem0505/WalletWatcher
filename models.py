@@ -131,10 +131,9 @@ class Account:
                 leverage=pos.leverage,
                 leverage_type=pos.leverage_type
             )
-            if pos_stamp_key in local_stamp and local_stamp[pos_stamp_key].size != pos.size:
-                pos.delta = pos.volume - local_stamp[pos_stamp_key].volume
+            if pos_stamp_key in local_stamp:
+                if local_stamp[pos_stamp_key].size != pos.size:
+                    pos.delta = pos.volume - local_stamp[pos_stamp_key].volume
                 del local_stamp[pos_stamp_key]
-            else:
-                pos.delta = 0
         for pos_stamp_key in local_stamp.keys():
             self.closed_positions.append(pos_stamp_key.ticker)
