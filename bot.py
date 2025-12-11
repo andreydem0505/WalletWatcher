@@ -129,7 +129,9 @@ def on_change_message(wallet: str, account: Account) -> str:
     for pos in account.positions:
         message += f"\n*{pos.ticker} {pos.direction} {pos.leverage} {pos.leverage_type}*"
         message += f"\nVolume: ${format_number(pos.volume)}"
-        if pos.delta != 0:
+        if pos.is_new:
+            message += " 🆕"
+        elif pos.delta != 0:
             sign = '+' if pos.delta > 0 else ''
             message += f" _({sign}${format_number(pos.delta)})_ 👈"
         message += f"\nEntry Price: {pos.entry_price}\n"

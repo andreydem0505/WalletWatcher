@@ -51,6 +51,7 @@ class Position:
         self.entry_price = entry_price
         self.volume = volume
         self.delta = 0
+        self.is_new = False
     
     def __eq__(self, other):
         if not isinstance(other, Position):
@@ -102,6 +103,7 @@ class Account:
             self.__make_stamp()
         self.positions = new_positions
         self.__calculate_delta()
+        self.__sort_positions()
 
     def __remove_old_actions(self, time: int):
         actions_to_delete = set()
@@ -135,5 +137,10 @@ class Account:
                 if local_stamp[pos_stamp_key].size != pos.size:
                     pos.delta = pos.volume - local_stamp[pos_stamp_key].volume
                 del local_stamp[pos_stamp_key]
+            else:
+                pos.is_new = True
         for pos_stamp_key in local_stamp.keys():
             self.closed_positions.append(pos_stamp_key.ticker)
+    
+    def __sort_positions(self):
+        self.positions.sort(key=lambda p: p.volume, reverse=True)
