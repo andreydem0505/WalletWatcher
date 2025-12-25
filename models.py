@@ -1,5 +1,4 @@
-def more_than_hour_ago(new_time: int, old_time: int) -> bool:
-    return new_time - old_time > 3600000
+from utils import more_than_hour_ago
 
 
 class TradeAction:
@@ -89,6 +88,7 @@ class Account:
         self.stamp: dict[PositionStampKey, PositionStampValue] = {}
         self.closed_positions: list[str] = [] # list of tickers
         self.need_new_message = False
+        self.last_message = ''
         self.last_trade = None
         self.message_ids: list[MessageId] = []
     

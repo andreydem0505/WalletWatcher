@@ -163,8 +163,9 @@ def worker():
                     message = on_change_message(wallet, account)
                     if account.need_new_message:
                         account.message_ids = send_everyone(message)
-                    else:
+                    elif account.last_message != message:
                         edit_message(account.message_ids, message)
+                    account.last_message = message
                 sleep(0.2)
             last_updated = datetime.now()
         except Exception as e:
