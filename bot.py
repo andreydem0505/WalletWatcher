@@ -92,7 +92,8 @@ def reply(m: telebot.types.Message):
 
     elif m.text.startswith('/settag '):
         try:
-            _, wallet, tag = m.text.split(' ')
+            wallet = m.text.split(' ')[1]
+            tag = ' '.join(m.text.split(' ')[2:])
             set_tag(m.chat.id, wallet, tag)
         except ValueError:
             bot.send_message(m.chat.id, 'Usage: /settag <wallet> <tag>')
