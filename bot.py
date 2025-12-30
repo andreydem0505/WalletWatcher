@@ -157,7 +157,7 @@ def worker():
             for wallet, account in accounts.items():
                 new_positions = fetch_open_positions(wallet)
                 if account.positions is None:
-                    accounts[wallet].positions = new_positions
+                    account.positions = new_positions
                 elif new_positions != account.positions:
                     last_trade = fetch_last_trade(wallet)
                     account.update(last_trade, new_positions)
@@ -167,7 +167,7 @@ def worker():
                     elif account.last_message != message:
                         edit_message(account.message_ids, message)
                     account.last_message = message
-                sleep(0.2)
+                sleep(0.5)
             last_updated = datetime.now()
         except Exception as e:
             logger.error(f"exception in worker: {e}")
