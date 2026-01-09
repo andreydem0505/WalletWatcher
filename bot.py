@@ -168,7 +168,8 @@ def worker():
                     elif account.last_message != message:
                         edit_message(account.message_ids, message)
                     account.last_message = message
-                sleep(0.5)
+                    sleep(1)
+                sleep(0.2)
             last_updated = datetime.now()
         except Exception as e:
             logger.error(f"exception in worker: {e}")
