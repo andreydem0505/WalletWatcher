@@ -19,6 +19,7 @@ def format_position(data: dict) -> Position:
         direction='Short' if data['position']['szi'][0] == '-' else 'Long',
         entry_price=data['position']['entryPx'],
         volume=int(float(data['position']['positionValue'])),
+        pnl=int(float(data['position']['unrealizedPnl'])),
     )
 
 

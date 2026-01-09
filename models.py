@@ -41,7 +41,7 @@ class PositionSnapshotValue:
 
 
 class Position:
-    def __init__(self, ticker, direction, leverage, leverage_type, size, entry_price, volume):
+    def __init__(self, ticker, direction, leverage, leverage_type, size, entry_price, volume, pnl):
         self.ticker = ticker
         self.direction = direction
         self.leverage = leverage
@@ -49,6 +49,7 @@ class Position:
         self.size = size
         self.entry_price = entry_price
         self.volume = volume
+        self.pnl = pnl
         self.delta = 0
         self.is_new = False
     

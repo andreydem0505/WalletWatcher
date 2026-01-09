@@ -135,7 +135,8 @@ def on_change_message(wallet: str, account: Account) -> str:
         elif pos.delta != 0:
             sign = '+' if pos.delta > 0 else ''
             message += f" _({sign}${format_number(pos.delta)})_ 👈"
-        message += f"\nEntry Price: {pos.entry_price}\n"
+        message += f"\nEntry Price: {pos.entry_price}"
+        message += f"\nP&L: ${format_number(pos.pnl)}\n"
     for closed_ticker in account.closed_positions:
         message += f"\n*{closed_ticker} Position Closed* ❌\n"
     message += '\n' + TRADER_URL + wallet
