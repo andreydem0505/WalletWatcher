@@ -15,7 +15,7 @@ class TradeAction:
         return hash((self.ticker, self.action))
 
 
-class PositionStampKey:
+class PositionSnapshotKey:
     def __init__(self, ticker, direction, leverage, leverage_type):
         self.ticker = ticker
         self.direction = direction
@@ -23,7 +23,7 @@ class PositionStampKey:
         self.leverage_type = leverage_type
     
     def __eq__(self, other):
-        if not isinstance(other, PositionStampKey):
+        if not isinstance(other, PositionSnapshotKey):
             return False
         return (self.ticker == other.ticker and
                 self.direction == other.direction and
@@ -34,7 +34,7 @@ class PositionStampKey:
         return hash((self.ticker, self.direction, self.leverage, self.leverage_type))
 
 
-class PositionStampValue:
+class PositionSnapshotValue:
     def __init__(self, size, volume):
         self.size = size
         self.volume = volume
@@ -85,7 +85,7 @@ class Account:
             self.tag = tag
         self.positions: list[Position] = None
         self.last_actions: dict[TradeAction, int] = {} # maps trade action to timestamp
-        self.stamp: dict[PositionStampKey, PositionStampValue] = {}
+        self.snapshot: dict[PositionSnapshotKey, PositionSnapshotValue] = {}
         self.closed_positions: list[str] = [] # list of tickers
         self.need_new_message = False
         self.last_message = ''
@@ -100,7 +100,7 @@ class Account:
         self.__remove_old_actions(time)
         self.last_actions[action] = time
         if self.need_new_message:
-            self.__make_stamp()
+            self.__make_snapshot()
         self.positions = new_positions
         self.__calculate_delta()
         self.__sort_positions()
@@ -113,34 +113,34 @@ class Account:
         for a in actions_to_delete:
             del self.last_actions[a]
     
-    def __make_stamp(self):
-        self.stamp = {}
+    def __make_snapshot(self):
+        self.snapshot = {}
         for pos in self.positions:
-            self.stamp[PositionStampKey(
+            self.snapshot[PositionSnapshotKey(
                 ticker=pos.ticker,
                 direction=pos.direction,
                 leverage=pos.leverage,
                 leverage_type=pos.leverage_type
-            )] = PositionStampValue(size=pos.size, volume=pos.volume)
+            )] = PositionSnapshotValue(size=pos.size, volume=pos.volume)
     
     def __calculate_delta(self):
-        local_stamp = self.stamp.copy()
+        local_snapshot = self.snapshot.copy()
         self.closed_positions = []
         for pos in self.positions:
-            pos_stamp_key = PositionStampKey(
+            pos_snapshot_key = PositionSnapshotKey(
                 ticker=pos.ticker,
                 direction=pos.direction,
                 leverage=pos.leverage,
                 leverage_type=pos.leverage_type
             )
-            if pos_stamp_key in local_stamp:
-                if local_stamp[pos_stamp_key].size != pos.size:
-                    pos.delta = pos.volume - local_stamp[pos_stamp_key].volume
-                del local_stamp[pos_stamp_key]
+            if pos_snapshot_key in local_snapshot:
+                if local_snapshot[pos_snapshot_key].size != pos.size:
+                    pos.delta = pos.volume - local_snapshot[pos_snapshot_key].volume
+                del local_snapshot[pos_snapshot_key]
             else:
                 pos.is_new = True
-        for pos_stamp_key in local_stamp.keys():
-            self.closed_positions.append(pos_stamp_key.ticker)
+        for pos_snapshot_key in local_snapshot.keys():
+            self.closed_positions.append(pos_snapshot_key.ticker)
     
     def __sort_positions(self):
         self.positions.sort(key=lambda p: p.volume, reverse=True)
