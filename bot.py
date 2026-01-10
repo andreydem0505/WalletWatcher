@@ -41,6 +41,8 @@ last_updated = datetime.now()
 
 accounts = load_accounts()
 
+MESSAGE_UPDATE_TIME = 0.5 * len(CHAT_IDS)
+
 
 def add_wallet(chat_id: int, wallet: str):
     if wallet not in accounts:
@@ -133,10 +135,11 @@ def on_change_message(wallet: str, account: Account) -> str:
         if pos.is_new:
             message += " 🆕"
         elif pos.delta != 0:
-            sign = '+' if pos.delta > 0 else ''
-            message += f" _({sign}${format_number(pos.delta)})_ 👈"
+            sign = '+' if pos.delta > 0 else '-'
+            message += f" _({sign}${format_number(abs(pos.delta))})_ 👈"
         message += f"\nEntry Price: {pos.entry_price}"
-        message += f"\nP&L: ${format_number(pos.pnl)}\n"
+        sign = '+' if pos.pnl > 0 else '-'
+        message += f"\nP&L: {sign}${format_number(abs(pos.pnl))}\n"
     for closed_ticker in account.closed_positions:
         message += f"\n*{closed_ticker} Position Closed* ❌\n"
     message += '\n' + TRADER_URL + wallet
@@ -168,7 +171,7 @@ def worker():
                     elif account.last_message != message:
                         edit_message(account.message_ids, message)
                     account.last_message = message
-                    sleep(1)
+                    sleep(MESSAGE_UPDATE_TIME)
                 sleep(0.2)
             last_updated = datetime.now()
         except Exception as e:
