@@ -41,8 +41,6 @@ last_updated = datetime.now()
 
 accounts = load_accounts()
 
-MESSAGE_UPDATE_TIME = 0.5 * len(CHAT_IDS)
-
 
 def add_wallet(chat_id: int, wallet: str):
     if wallet not in accounts:
@@ -150,6 +148,7 @@ def edit_message(message_ids: list[MessageId], text: str):
     for message_id in message_ids:
         try:
             bot.edit_message_text(chat_id=message_id.chat_id, message_id=message_id.message_id, text=text)
+            sleep(0.5)
         except Exception as e:
             logger.error(f"exception while editing message: {e}")
 
@@ -171,7 +170,6 @@ def worker():
                     elif account.last_message != message:
                         edit_message(account.message_ids, message)
                     account.last_message = message
-                    sleep(MESSAGE_UPDATE_TIME)
                 sleep(0.2)
             last_updated = datetime.now()
         except Exception as e:
