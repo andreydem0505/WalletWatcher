@@ -148,7 +148,7 @@ def edit_message(message_ids: list[MessageId], text: str):
     for message_id in message_ids:
         try:
             bot.edit_message_text(chat_id=message_id.chat_id, message_id=message_id.message_id, text=text)
-            sleep(0.5)
+            sleep(1)
         except Exception as e:
             logger.error(f"exception while editing message: {e}")
 
