@@ -8,7 +8,7 @@ from dotenv import load_dotenv
 import logging
 import signal
 import atexit
-from models import Account, MessageId
+from models import Account, MessageId, TradeAction
 from serialization import load_accounts, save_wallets
 from data_fetcher import fetch_open_positions, fetch_last_trade
 from format import format_number
@@ -163,6 +163,8 @@ def worker():
                     account.positions = new_positions
                 elif new_positions != account.positions:
                     last_trade = fetch_last_trade(wallet)
+                    action = TradeAction(last_trade.ticker, last_trade.action)
+                    logger.debug(f"Update! new time: {last_trade.timestamp}, old time: {account.last_actions[action]}")
                     account.update(last_trade, new_positions)
                     message = on_change_message(wallet, account)
                     if account.need_new_message:
