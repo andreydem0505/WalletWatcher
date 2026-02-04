@@ -32,7 +32,7 @@ MODE = os.getenv('MODE')
 
 TIMEZONE = timezone('Europe/Moscow')
 
-TRADER_URL = 'https://legacy.hyperdash.com/trader/'
+TRADER_URL = 'https://hyperdash.com/trader/'
 
 bot = telebot.TeleBot(TOKEN, parse_mode='Markdown')
 
