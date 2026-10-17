@@ -101,7 +101,7 @@ class Application:
             for wallet, account in self.accounts.items():
                 last = datetime.fromtimestamp(account.last_updated, MOSCOW).strftime('%Y-%m-%d %H:%M:%S') if account.last_updated else 'not yet'
                 tag = f'\n{escape(account.tag)}' if account.tag else ''
-                lines.append(f'<code>{escape(wallet)}</code>{tag}\nLast success: {last}; failures: {account.failures}')
+                lines.append(f'<code>{escape(wallet)}</code>{tag}\nLast success: {last}; failures: {account.failures}\n')
         # Keep each wallet and its HTML tags intact when splitting long lists.
         message = ''
         for line in lines:

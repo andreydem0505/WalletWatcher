@@ -417,7 +417,7 @@ class ApplicationTests(unittest.TestCase):
         self.app.outbox.deliver_once()
         request = self.bot.send_message.call_args.kwargs
         self.assertEqual(request['parse_mode'], 'HTML')
-        self.assertIn(f'<code>{WALLET}</code>\nwhale &lt;&gt;&amp;\nLast success: not yet; failures: 0',
+        self.assertIn(f'<code>{WALLET}</code>\nwhale &lt;&gt;&amp;\nLast success: not yet; failures: 0\n',
                       request['text'])
 
     def test_long_wallet_list_preserves_complete_copyable_addresses(self):
@@ -427,6 +427,7 @@ class ApplicationTests(unittest.TestCase):
         jobs = self.app.outbox.db.execute('SELECT text, html FROM outbox ORDER BY rowid').fetchall()
         self.assertGreater(len(jobs), 1)
         text = '\n'.join(job['text'] for job in jobs)
+        self.assertEqual(text.count('Last success: not yet; failures: 0\n\n<code>'), len(wallets) - 1)
         for wallet in wallets:
             self.assertEqual(text.count(f'<code>{wallet}</code>'), 1)
         for job in jobs:
