@@ -1,5 +1,12 @@
-logs
-wallets.txt
-.venv/
 .env
+.env.*
+!.env.example
+wallets.txt
+*.sqlite3*
+*.log
+.DS_Store
+.idea/
 __pycache__/
+.venv/
+.coverage*
+htmlcov/

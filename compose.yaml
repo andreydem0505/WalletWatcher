@@ -1,0 +1,34 @@
+name: walletwatcher
+
+services:
+  walletwatcher:
+    build:
+      context: .
+      target: runtime
+    image: walletwatcher:local
+    env_file:
+      - path: .env
+        required: false
+    environment:
+      WALLETWATCHER_DATA_DIR: /data
+      WALLETWATCHER_HEARTBEAT: /tmp/walletwatcher-heartbeat
+    volumes:
+      - walletwatcher-data:/data
+    init: true
+    restart: unless-stopped
+    stop_grace_period: 30s
+    read_only: true
+    tmpfs:
+      - /tmp:size=16m,mode=1777
+    cap_drop:
+      - ALL
+    security_opt:
+      - no-new-privileges:true
+    logging:
+      driver: json-file
+      options:
+        max-size: "5m"
+        max-file: "3"
+
+volumes:
+  walletwatcher-data:
