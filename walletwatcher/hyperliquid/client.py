@@ -20,7 +20,30 @@ WS_URL = 'wss://api.hyperliquid.xyz/ws'
 
 
 class DataFetchError(Exception):
-    pass
+    def __init__(self, message, *, operation=None, reason='network', status_code=None,
+                 retry_after=0, retryable=True):
+        super().__init__(message)
+        self.operation = operation
+        self.reason = reason
+        self.status_code = status_code
+        self.retry_after = retry_after
+        self.retryable = retryable
+
+    def diagnostic(self):
+        # Never include response bodies, request payloads, URLs or exception text.
+        reasons = {'budget': 'the bot request budget is busy',
+                   'rate_limit': 'Hyperliquid rate limiting is active',
+                   'timeout': 'the Hyperliquid request timed out',
+                   'network': 'a network connection failed',
+                   'http': 'Hyperliquid rejected the data request',
+                   'invalid_response': 'Hyperliquid returned invalid JSON'}
+        result = reasons.get(self.reason, 'the data request failed')
+        if type(self.status_code) is int and 100 <= self.status_code <= 599:
+            result += f' (HTTP {self.status_code})'
+        if self.operation in ('userRole', 'meta', 'perpDexs', 'clearinghouseState',
+                              'userFills', 'userFillsByTime', 'allMids', 'orderStatus', 'exchange'):
+            result += f' [request: {self.operation}]'
+        return result
 
 
 class HyperliquidClient:
@@ -29,6 +52,7 @@ class HyperliquidClient:
         self.session = session or requests.Session()
         self.clock = clock
         self.blocked_until = 0.0
+        self.blocked_reason = 'rate_limit'
         self.perp_dexs = tuple(dict.fromkeys(perp_dexs))
         if not self.perp_dexs:
             raise ValueError('At least one perpetual dex is required')
@@ -62,13 +86,16 @@ class HyperliquidClient:
             self.calls.popleft()
         # userFills: base 20 + up to 2000/20 response items. Reserve the
         # documented upper bound, then adjust to the actual returned count.
-        weight = (2 if request_type in ('clearinghouseState', 'spotClearinghouseState') else
+        weight = (2 if request_type in ('clearinghouseState', 'spotClearinghouseState', 'allMids', 'orderStatus') else
                   120 if request_type in ('userFills', 'userFillsByTime') else
                   60 if request_type == 'userRole' else 1 if request_type == 'exchange' else 20)
         if sum(call[1] for call in self.calls) + weight > self.weight_budget:
             if self.calls:
                 self.blocked_until = max(self.blocked_until, self.calls[0][0] + 60)
-            raise DataFetchError('Hyperliquid request weight budget exhausted; retrying later')
+                self.blocked_reason = 'budget'
+            raise DataFetchError('Hyperliquid request weight budget exhausted; retrying later',
+                                 operation=request_type, reason='budget',
+                                 retry_after=max(1, self.blocked_until - now))
         reservation = [now, weight]
         self.calls.append(reservation)
         return reservation
@@ -83,10 +110,14 @@ class HyperliquidClient:
     def _perform_request(self, payload, session=None, *, exchange=False):
         heartbeat = getattr(self.worker, 'heartbeat', self.heartbeat)
         heartbeat()
+        operation = 'exchange' if exchange else payload['type']
         with self.budget_lock:
             if self.clock() < self.blocked_until:
-                raise DataFetchError('Hyperliquid rate-limit cooldown is active')
-            reservation = self._reserve_weight('exchange' if exchange else payload['type'])
+                raise DataFetchError('Hyperliquid rate-limit cooldown is active', operation=operation,
+                                     reason=self.blocked_reason,
+                                     retry_after=max(1, self.blocked_until - self.clock()))
+            reservation = self._reserve_weight(operation)
+        response = None
         try:
             response = (session if session is not None else self.session).post(
                 API_URL.replace('/info', '/exchange') if exchange else API_URL,
@@ -95,6 +126,7 @@ class HyperliquidClient:
                 delay = self.retry_delay(response.headers.get('Retry-After', 30))
                 with self.budget_lock:
                     self.blocked_until = max(self.blocked_until, self.clock() + delay)
+                    self.blocked_reason = 'rate_limit'
             response.raise_for_status()
             data = response.json()
             if not exchange and payload['type'] in ('userFills', 'userFillsByTime') and isinstance(data, list):
@@ -102,7 +134,21 @@ class HyperliquidClient:
                     reservation[1] = 20 + math.ceil(len(data) / 20)
             return data
         except (requests.RequestException, ValueError) as error:
-            raise DataFetchError(f'Hyperliquid request failed ({type(error).__name__})') from error
+            status = getattr(response, 'status_code', None)
+            status = status if type(status) is int else None
+            if isinstance(error, requests.Timeout):
+                reason = 'timeout'
+            elif isinstance(error, requests.HTTPError):
+                reason = 'rate_limit' if status == 429 else 'http'
+            elif isinstance(error, ValueError):
+                reason = 'invalid_response'
+            else:
+                reason = 'network'
+            raise DataFetchError(f'Hyperliquid request failed ({type(error).__name__})',
+                                 operation=operation, reason=reason, status_code=status,
+                                 retryable=reason in ('timeout', 'network', 'rate_limit')
+                                 or (reason == 'http' and (status is None or status == 408 or status >= 500)),
+                                 retry_after=max(0, self.blocked_until - self.clock())) from error
         finally:
             heartbeat()
 

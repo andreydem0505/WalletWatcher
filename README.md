@@ -223,6 +223,16 @@ chat. The source address must already be tracked. Use the full ticker for
 HIP-3 perps, e.g. `xyz:EWZ`; this works independently of `PERP_DEXS`.
 The asynchronous activation confirms both open positions and the saved key's
 authority. Main accounts and subaccounts are supported; vault trading is rejected.
+Temporary network failures, HTTP 429/5xx and the shared request budget defer
+activation instead of immediately deleting the request. Validation makes at most
+three attempts, respecting the cooldown and a five-minute overall deadline. The bot
+reports that activation is pending; no rule is armed until validation succeeds.
+Retries repeat the fresh position checks, so the baseline belongs to successful
+activation. Queued retries survive restarts and can be cancelled normally.
+HTTP 4xx other than 408/429 and invalid JSON fail immediately. Safe diagnostics
+identify the activation stage, request type and HTTP status or local budget;
+response bodies, keys and request payloads are never included. These retries
+apply only to activation, never to an order with an uncertain outcome.
 Use a dedicated API agent for this bot so another trading process does not compete
 for the same signer's nonces.
 

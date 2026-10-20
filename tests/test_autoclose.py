@@ -618,8 +618,8 @@ class RuleTests(ApplicationFixture):
         self.command(f'/autoclose {WALLET} BTC')
         with patch.object(self.exchange, 'authority', side_effect=DataFetchError('offline')):
             self.worker.cycle()
-        self.assertIn('data is unavailable', self.jobs()[-1]['text'])
-        self.assertFalse(self.store.active())
+        self.assertIn('Retrying automatically', self.jobs()[-1]['text'])
+        self.assertEqual(self.store.active()[0]['state'], 'queued')
 
     def test_full_database_reopen_preserves_rules_orders_credentials_and_notifications(self):
         from walletwatcher.app import Application

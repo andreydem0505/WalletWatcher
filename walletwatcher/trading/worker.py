@@ -41,14 +41,19 @@ class AutocloseWorker:
         credentials = self.app.credentials.load(rule['user'])
         if credentials is None:
             raise TradingError('Credentials are missing. Save them with /creds first.')
+        rule['activation_stage'] = 'checking trading permissions'
         signer, vault = self.api.authority(credentials)
+        rule['activation_stage'] = 'loading market metadata'
         market = self.api.market(rule['ticker'])
+        rule['activation_stage'] = 'reading the tracked wallet position'
         source, _ = self.api.position(rule['wallet'], market, fresh=True)
+        rule['activation_stage'] = 'reading your trading account position'
         own, stamp = self.api.position(credentials.address, market, fresh=True)
         if source == 0:
             raise TradingError('The tracked wallet has no open position in this ticker.')
         if own == 0:
             raise TradingError('Your trading account has no open position in this ticker.')
+        rule['activation_stage'] = 'checking your position fill history'
         boundary = self.api.fills(credentials.address, stamp, stamp)
         own_boundary = [f for f in boundary if f['coin'] == market.coin]
         if own_boundary:
@@ -56,6 +61,8 @@ class AutocloseWorker:
             after = decimal(last['startPosition']) + decimal(last['sz']) * (1 if last['side'] == 'B' else -1)
             if after != own:
                 raise TradingError('Your position changed during activation. Please retry /autoclose.')
+        if self.clock() >= rule.get('activation_deadline', float('inf')):
+            raise TradingError('Activation timed out; no rule was armed. Please retry /autoclose.')
         rule.update(address=credentials.address, signer=signer, vault=vault, market=asdict(market), ticker=market.coin,
                     source_size=str(source), own_size=str(own), original_size=str(own),
                     checkpoint=stamp, state='armed')
@@ -131,6 +138,15 @@ class AutocloseWorker:
                                        'No new order will be sent; check your account.')
                 return  # One unresolved order per trading account and instrument.
         if rule['state'] == 'queued':
+            if 'activation_deadline' not in rule:
+                rule['activation_deadline'] = self.clock() + 300
+                self.store.save(rule)
+            if self.clock() >= rule['activation_deadline']:
+                self.finish(rule, 'failed', rule.get('activation_error', 'Activation did not complete.') +
+                            ' Activation timed out; no rule was armed. Please retry /autoclose.')
+                return
+            if self.clock() < rule.get('activation_retry_at', 0):
+                return
             self.arm(rule)
             return
         market = Market(**rule['market'])
@@ -247,9 +263,9 @@ class AutocloseWorker:
                 break
             try:
                 self.step(rule)
-            except DataFetchError:
+            except DataFetchError as error:
                 if rule['state'] == 'queued':
-                    self.finish(rule, 'failed', 'fresh Hyperliquid data is unavailable. Please retry /autoclose later.')
+                    self.activation_failed(rule, error)
                 elif 'pending' in rule and self.clock() * 1000 > rule['pending']['expires'] + 5000:
                     self.finish(rule, 'failed', 'order outcome could not be verified. No further orders will be sent; check your account.')
                 # Read-only API/rate failures defer the check without fabricating a close.
@@ -259,6 +275,25 @@ class AutocloseWorker:
                 logger.error('Autoclose rule %s failed (%s)', rule['id'], type(error).__name__)
                 self.finish(rule, 'failed', 'account data or credentials could not be verified. '
                             'No further orders will be sent; check your account.')
+
+    def activation_failed(self, rule, error):
+        stage = rule.get('activation_stage', 'loading account data')
+        reason = f"activation failed while {stage}: {error.diagnostic()}."
+        # Only safe, structured details; never log credentials or exception text.
+        logger.warning('Autoclose rule %s: %s', rule['id'], reason)
+        failures = rule.get('activation_failures', 0) + 1
+        rule.update(activation_failures=failures, activation_error=reason)
+        if not error.retryable or failures >= 3:
+            self.finish(rule, 'failed', reason + ' No rule was armed. Please retry /autoclose later.')
+            return
+        deadline = rule.setdefault('activation_deadline', self.clock() + 300)
+        delay = max(self.app.config.poll_interval * 2 ** (failures - 1), error.retry_after)
+        rule['activation_retry_at'] = min(deadline, self.clock() + delay)
+        self.store.save(rule)
+        if failures == 1 and rule['user'] in self.app.config.chat_ids:
+            self.app.outbox.enqueue(rule['user'],
+                f"Autoclose {rule['ticker']}: {reason} Retrying automatically; the rule is not armed yet.",
+                key='autoclose-activation:' + rule['id'])
 
     def run(self, heartbeat):
         self.app.client.set_heartbeat(heartbeat)
