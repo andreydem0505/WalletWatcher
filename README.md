@@ -15,6 +15,7 @@ walletwatcher/
   domain/            Position models and time helpers
   hyperliquid/       HTTP client and on-demand WebSocket snapshots
   storage/           Wallet files, encrypted credentials and delivery queue
+  trading/           Persistent one-shot autoclose rules and signed IOC execution
   presentation/      Parsing and formatting of alerts and personal portfolios
   infrastructure/    Logging, watchdogs, process supervisor and health check
 tests/               Offline regression tests and an opt-in live API check
@@ -143,6 +144,9 @@ Commands:
 - `/settag 0x... some tag` (at most 100 characters, without semicolons/newlines)
 - `/creds <address> <private key API wallet>` (private chat only)
 - `/my` (private chat only)
+- `/autoclose <wallet> <ticker>` (private chat only)
+- `/cancelautoclose <wallet> <ticker>` (private chat only)
+- `/autocloses` — list your active rules (private chat only, no arguments).
 - Any other text shows wallets, per-wallet last successful update, failure
   counts and the number of queued notifications.
 
@@ -164,7 +168,8 @@ including in `MODE=TEST`.
 `/creds <address> <private key API wallet>` saves or replaces your own account
 address and API/agent-wallet key. Use the actual trading account address, not
 the agent address. This stores credentials; it does not verify the agent's
-approval or ownership, and does not enable trading. The key is validated as a
+approval or ownership. Trading is enabled only by an explicit `/autoclose` rule,
+which verifies trading authority separately. The key is validated as a
 secp256k1 private key. Never send a seed phrase or the main wallet's key.
 
 The bot tries to delete the incoming credentials message, including rejected
@@ -210,6 +215,82 @@ change monitoring. Spot positions are not listed. Long portfolios
 are split into multiple complete HTML messages, without omitting positions.
 An unavailable API or incomplete snapshot produces a retry message rather
 than a misleading partial portfolio.
+
+### One-shot autoclose
+
+After saving `/creds`, send `/autoclose 0x... BTC` in your authorized private
+chat. The source address must already be tracked. Use the full ticker for
+HIP-3 perps, e.g. `xyz:EWZ`; this works independently of `PERP_DEXS`.
+The asynchronous activation confirms both open positions and the saved key's
+authority. Main accounts and subaccounts are supported; vault trading is rejected.
+Use a dedicated API agent for this bot so another trading process does not compete
+for the same signer's nonces.
+
+The source baseline is its signed quantity at activation. When a subsequent
+snapshot shows **less than 10%** remaining in the original direction, the bot
+closes your entire current position in that ticker, in either direction.
+Exactly 10% does not trigger. Source increases do not reset the baseline; a
+source reversal counts as a full close. A temporary dip and recovery between
+checks does not trigger. Checks run in a separate supervised worker, with
+`POLL_INTERVAL` between cycles; API cooldowns and request time can delay them.
+The worker has its own HTTP session and shares the application's IP rate budget.
+Wallet/DEX snapshots are shared between rules within a cycle; a fresh user
+snapshot is mandatory immediately before each order.
+
+The rule follows your original position. Its fill history is checked even when
+the net position size is unchanged. Manual closure, reversal, TP/SL or liquidation
+ends that lifecycle; a reopened position does not inherit the rule. Incomplete,
+truncated or inconsistent history stops the rule without placing a new order.
+The history guard conservatively stops if 2000 recent fills no longer reach the
+saved checkpoint. The exchange cannot atomically bind an order to one opening:
+manual close/reopen racing with final validation and order submission remains an
+API limitation. Avoid simultaneous manual trading during execution.
+
+Market close uses a signed `reduceOnly` IOC limit order. The price limit is fixed
+at 1% from the fresh midpoint before the first attempt, rounded inward to valid
+perpetual price precision. It is never widened. At most three submissions are
+made, at least two seconds apart, using the actual remaining size. An IOC may
+partially fill or fail to match; after the final attempt the bot reports the
+remainder. Existing TP/SL orders are not modified.
+
+Rules, boundary fill IDs, monotonic nonces, client order IDs and attempts are
+saved in SQLite before submission. After a restart or timeout the worker checks
+the old order and fills first; an uncertain request is never blindly replayed.
+Requests expire after 15 seconds. If their outcome remains unknown after expiry
+and a five-second reconciliation grace period, the rule stops and asks you to
+check the account. A successful HTTP response alone is insufficient: actual fills
+and a zero position remainder must be confirmed. The final private notification
+includes quantity, average execution price, account and source. Rule completion
+and its notification commit together; the durable delivery queue handles retries.
+An unresolved order also blocks other rules for that account and ticker. Late
+read-only reconciliation continues after failure; a definitive exchange status
+releases this block, and a subsequently confirmed full close updates the final
+notification without submitting another order.
+
+`/cancelautoclose 0x... BTC` records cancellation immediately and prevents further
+submissions. An already submitted request may still fill; the worker reconciles
+it and reports the result. Removing the source, replacing credentials (even with
+the same address) or removing the user's personal chat from `CHAT_IDS` also
+cancels their rules. No notification is sent to a revoked chat. Multiple source
+rules may target one position, but only one unresolved order can exist for that
+account and ticker. Success, cancellation or final failure ends the rule; send a
+new `/autoclose` command to arm it again.
+
+`/autocloses` lists only your active rules in creation order, one per line:
+`0x...` followed by the ticker (e.g. `BTC` or `xyz:SPCX`). Addresses are formatted
+as inline code for copying. Cancelled and completed rules are omitted immediately;
+an empty list returns `You have no active autoclose rules.` No exchange request
+or private-key decryption is needed to display the list.
+
+Implementation follows the official [exchange API](https://hyperliquid.gitbook.io/hyperliquid-docs/for-developers/api/exchange-endpoint),
+[order and fill queries](https://hyperliquid.gitbook.io/hyperliquid-docs/for-developers/api/info-endpoint),
+[asset IDs](https://hyperliquid.gitbook.io/hyperliquid-docs/for-developers/api/asset-ids)
+and [nonce rules](https://hyperliquid.gitbook.io/hyperliquid-docs/for-developers/api/nonces-and-api-wallets).
+The official SDK is used for signing only; all HTTP requests use the application's
+bounded, rate-accounted client. Development tests use public test keys and exchange
+simulations; they never submit a real order.
+
+### Personal portfolio fields
 
 The displayed fields are:
 
@@ -346,7 +427,7 @@ unexpected network request fails even outside Docker. All API responses and
 Telegram deliveries are simulated; persistence tests use temporary SQLite
 databases and wallet files. Production dependencies are used without import stubs.
 
-To include line and branch coverage (minimum combined coverage: 90%):
+To include line and branch coverage (minimum combined coverage: 90%, autoclose: 95%):
 
 ```sh
 docker run --rm --network none --read-only --tmpfs /tmp walletwatcher:tests \

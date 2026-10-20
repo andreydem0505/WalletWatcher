@@ -40,10 +40,13 @@ def main():
             coverage.stop()
             coverage.save()
     enough_coverage = coverage is None or coverage.report(show_missing=True) >= 90
+    enough_autoclose_coverage = coverage is None or coverage.report(
+        include=['*/trading/*.py', '*/storage/autoclose.py'], show_missing=True) >= 95
     attempted_network = any(call.called for call in blocked_calls)
     if attempted_network:
         print('FAIL: unexpected network access was attempted during tests', file=sys.stderr)
-    return 0 if result.wasSuccessful() and enough_coverage and not attempted_network else 1
+    return 0 if (result.wasSuccessful() and enough_coverage and enough_autoclose_coverage
+                 and not attempted_network) else 1
 
 
 if __name__ == '__main__':

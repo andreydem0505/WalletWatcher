@@ -63,26 +63,30 @@ class DeliveryQueue:
         self.db.execute('INSERT OR REPLACE INTO metadata VALUES (?, ?)', (key, str(value)))
 
     def enqueue(self, chat, text, *, key=None, generation='', html=False):
+        with self.lock, self.db:
+            self.enqueue_transaction(chat, text, key=key, generation=generation, html=html)
+
+    def enqueue_transaction(self, chat, text, *, key=None, generation='', html=False):
+        """Caller owns lock/transaction; allows business state and reply to commit together."""
         if not text:
             return
         persistent = key is not None
         key = key or 'reply:' + uuid4().hex
-        with self.lock, self.db:
-            receipt = self.db.execute('SELECT * FROM receipts WHERE key=?', (key,)).fetchone()
-            pending = self.db.execute('SELECT * FROM outbox WHERE key=?', (key,)).fetchone()
-            if pending is not None and pending['generation'] == generation and pending['text'] == text:
-                return
-            if pending is None and receipt is not None and receipt['generation'] == generation and receipt['text'] == text:
-                return
-            if pending is None and self.db.execute('SELECT count(*) FROM outbox').fetchone()[0] >= 10000:
-                raise OutboxFull('Telegram outbox is full; delivery needs attention')
-            # Keep a previous retry deadline when replacing text: new updates must
-            # not bypass a flood wait or a network-error backoff.
-            self.db.execute('''
-                INSERT INTO outbox VALUES (?, ?, ?, ?, ?, 1, ?, 0, ?)
-                ON CONFLICT(key) DO UPDATE SET generation=excluded.generation,
-                    text=excluded.text, html=excluded.html, revision=outbox.revision+1
-            ''', (key, chat, generation, text, int(html), self.clock(), int(persistent)))
+        receipt = self.db.execute('SELECT * FROM receipts WHERE key=?', (key,)).fetchone()
+        pending = self.db.execute('SELECT * FROM outbox WHERE key=?', (key,)).fetchone()
+        if pending is not None and pending['generation'] == generation and pending['text'] == text:
+            return
+        if pending is None and receipt is not None and receipt['generation'] == generation and receipt['text'] == text:
+            return
+        if pending is None and self.db.execute('SELECT count(*) FROM outbox').fetchone()[0] >= 10000:
+            raise OutboxFull('Telegram outbox is full; delivery needs attention')
+        # Keep a previous retry deadline when replacing text: new updates must
+        # not bypass a flood wait or a network-error backoff.
+        self.db.execute('''
+            INSERT INTO outbox VALUES (?, ?, ?, ?, ?, 1, ?, 0, ?)
+            ON CONFLICT(key) DO UPDATE SET generation=excluded.generation,
+                text=excluded.text, html=excluded.html, revision=outbox.revision+1
+        ''', (key, chat, generation, text, int(html), self.clock(), int(persistent)))
 
     def forget_wallet(self, wallet):
         prefix = f'wallet:{wallet}:'

@@ -3,6 +3,7 @@ from dataclasses import dataclass, field
 import os
 from pathlib import Path
 import re
+import hashlib
 
 from cryptography.fernet import Fernet
 from cryptography.hazmat.primitives.asymmetric import ec
@@ -80,6 +81,13 @@ class CredentialsStore:
             row = self.db.execute('SELECT address FROM user_credentials WHERE bot_id=? AND user_id=?',
                                   (self.bot_id, user_id)).fetchone()
             return row[0] if row else None
+
+    def version(self, user_id):
+        """Opaque registration version; replacement invalidates armed rules."""
+        with self.lock:
+            row = self.db.execute('SELECT address,encrypted_key FROM user_credentials WHERE bot_id=? AND user_id=?',
+                                  (self.bot_id, user_id)).fetchone()
+            return hashlib.sha256(row[0].encode() + row[1]).hexdigest() if row else None
 
     def load(self, user_id):
         with self.lock:

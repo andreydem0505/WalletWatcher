@@ -63,7 +63,8 @@ class HyperliquidClient:
         # userFills: base 20 + up to 2000/20 response items. Reserve the
         # documented upper bound, then adjust to the actual returned count.
         weight = (2 if request_type in ('clearinghouseState', 'spotClearinghouseState') else
-                  120 if request_type == 'userFills' else 20)
+                  120 if request_type in ('userFills', 'userFillsByTime') else
+                  60 if request_type == 'userRole' else 1 if request_type == 'exchange' else 20)
         if sum(call[1] for call in self.calls) + weight > self.weight_budget:
             if self.calls:
                 self.blocked_until = max(self.blocked_until, self.calls[0][0] + 60)
@@ -79,23 +80,24 @@ class HyperliquidClient:
         with self.request_lock:
             return self._perform_request(payload)
 
-    def _perform_request(self, payload, session=None):
+    def _perform_request(self, payload, session=None, *, exchange=False):
         heartbeat = getattr(self.worker, 'heartbeat', self.heartbeat)
         heartbeat()
         with self.budget_lock:
             if self.clock() < self.blocked_until:
                 raise DataFetchError('Hyperliquid rate-limit cooldown is active')
-            reservation = self._reserve_weight(payload['type'])
+            reservation = self._reserve_weight('exchange' if exchange else payload['type'])
         try:
             response = (session if session is not None else self.session).post(
-                API_URL, json=payload, timeout=(5, 15))
+                API_URL.replace('/info', '/exchange') if exchange else API_URL,
+                json=payload, timeout=(5, 15))
             if response.status_code == 429:
                 delay = self.retry_delay(response.headers.get('Retry-After', 30))
                 with self.budget_lock:
                     self.blocked_until = max(self.blocked_until, self.clock() + delay)
             response.raise_for_status()
             data = response.json()
-            if payload['type'] == 'userFills' and isinstance(data, list):
+            if not exchange and payload['type'] in ('userFills', 'userFillsByTime') and isinstance(data, list):
                 with self.budget_lock:
                     reservation[1] = 20 + math.ceil(len(data) / 20)
             return data

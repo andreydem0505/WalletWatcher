@@ -3,3 +3,4 @@ requests==2.34.2
 python-dotenv==1.2.4
 cryptography==50.0.2
 websocket-client==1.9.2
+hyperliquid-python-sdk==0.24.0

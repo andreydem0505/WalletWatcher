@@ -14,6 +14,9 @@ from telebot import apihelper
 
 from walletwatcher.config import Config, ConfigError
 from walletwatcher.storage.credentials import CredentialsStore
+from walletwatcher.storage.autoclose import AutocloseStore
+from walletwatcher.trading.api import ticker_name
+from walletwatcher.trading.worker import AutocloseWorker
 from walletwatcher.hyperliquid.client import DataFetchError, HyperliquidClient
 from walletwatcher.storage.delivery import DeliveryQueue
 from walletwatcher.presentation.formatting import on_change_message
@@ -36,6 +39,12 @@ HELP_TEXT = (
     '/my — show your account balance and open positions: margin, prices, '
     'P&L, funding and configured TP/SL. No arguments; private chat only. '
     'Save your credentials using /creds first.\n\n'
+    '/autoclose <wallet> <ticker> — once the tracked wallet has less than 10% of its '
+    'initial position remaining, market-close your position in this ticker. '
+    'Private chat only; /creds required. One-shot, 1% price limit, up to 3 attempts.\n\n'
+    '/cancelautoclose <wallet> <ticker> — cancel your rule. Already submitted orders '
+    'may still execute. Use full HIP-3 tickers such as xyz:EWZ.\n\n'
+    '/autocloses — your active rules; private chat only.\n\n'
     '<address> — a wallet address starting with 0x; for /creds, use the trading '
     'account address, not the API wallet address.\n'
     '<private_key> — the API/agent wallet private key, not your main wallet key.\n'
@@ -65,6 +74,8 @@ class Application:
         self.credentials = CredentialsStore(
             self.outbox.db, self.outbox.lock, config.token.split(':', 1)[0],
             config.database_file.with_name('credentials.key'))
+        self.autoclose_store = AutocloseStore(self.outbox, config.token.split(':', 1)[0])
+        self.autoclose = AutocloseWorker(self, self.autoclose_store)
         self.offset = int(self.outbox.get_metadata('telegram_offset', 0))
         self.outbox.prune(self.accounts, config.recipients, config.chat_ids)
 
@@ -83,6 +94,9 @@ class Application:
             return
         args = message.text.split()
         command = args[0].split('@', 1)[0].lower() if args else ''
+        if command in ('/autoclose', '/cancelautoclose', '/autocloses'):
+            self.autoclose_command(message, command, args)
+            return
         if command in ('/creds', '/my'):
             self.personal_command(message, command, args)
             return
@@ -114,6 +128,56 @@ class Application:
             logger.warning('Could not delete credentials message (%s)', type(error).__name__)
             return False
 
+    def autoclose_command(self, message, command, args):
+        user = getattr(getattr(message, 'from_user', None), 'id', None)
+        chat = message.chat.id
+        if (getattr(message.chat, 'type', None) != 'private' or type(user) is not int
+                or user <= 0 or user != chat):
+            self.reply(chat, 'Autoclose commands are available only in your private chat with the bot.')
+            return
+        try:
+            if command == '/autocloses':
+                if len(args) != 1:
+                    raise ValueError('Usage: /autocloses')
+                self.list_autocloses(user)
+                return
+            if len(args) != 3:
+                raise ValueError(f'Usage: {command} <wallet> <ticker>')
+            wallet, ticker = normalize_wallet(args[1]), ticker_name(args[2])
+            version = self.credentials.version(user)
+            if version is None:
+                raise ValueError('Credentials are missing. Save them with /creds first.')
+            if command == '/cancelautoclose':
+                if not self.autoclose_store.cancel(user, wallet, ticker):
+                    raise ValueError('No active autoclose rule was found for this wallet and ticker.')
+                self.reply(chat, 'Autoclose cancellation recorded. No new orders will be submitted. '
+                           'An already submitted order may still execute.')
+                return
+            with self.lock:
+                if wallet not in self.accounts:
+                    raise ValueError('This wallet is not being tracked.')
+            self.autoclose_store.create(user, wallet, ticker, version)
+            self.reply(chat, 'Autoclose request saved. Checking fresh positions and API-wallet permissions.')
+        except ValueError as error:
+            self.reply(chat, redact_secrets(str(error)))
+        except Exception as error:
+            logger.error('Autoclose command failed (%s)', type(error).__name__)
+            self.reply(chat, 'Autoclose command failed; no activation was confirmed. Please retry.')
+
+    def list_autocloses(self, user):
+        rules = self.autoclose_store.for_user(user)
+        if not rules:
+            self.reply(user, 'You have no active autoclose rules.')
+            return
+        text = ''
+        for rule in rules:
+            line = f"<code>{escape(rule['wallet'])}</code> {escape(rule['ticker'])}"
+            if text and len(text) + len(line) + 1 > 1500:
+                self.outbox.enqueue(user, text, html=True)
+                text = ''
+            text += ('\n' if text else '') + line
+        self.outbox.enqueue(user, text, html=True)
+
     def personal_command(self, message, command, args):
         chat = message.chat.id
         deleted = self.delete_credentials_message(message) if command == '/creds' else False
@@ -127,6 +191,7 @@ class Application:
                 if len(args) != 3:
                     raise ValueError('Использование: /creds <address> <private key API wallet>')
                 self.credentials.save(user_id, args[1], args[2])
+                self.autoclose_store.cancel(user_id)
                 response = 'Данные аккаунта сохранены и привязаны к вашему Telegram ID. Позиции: /my'
                 if not deleted:
                     response += '\nСообщение с ключом удалить не удалось — удалите его вручную.'
@@ -235,6 +300,7 @@ class Application:
                 self.accounts = proposed
                 if command == '/removewallet':
                     self.outbox.forget_wallet(wallet)
+                    self.autoclose_store.cancel_source(wallet)
             self.broadcast(response)
             return
         with self.lock:
@@ -367,6 +433,7 @@ class Application:
         supervisor.add('delivery', lambda beat: self.outbox.run(self.stop, beat))
         supervisor.add('polling', self.polling)
         supervisor.add('personal', self.personal_worker)
+        supervisor.add('autoclose', self.autoclose.run)
         heartbeat_path = os.getenv('WALLETWATCHER_HEARTBEAT')
         try:
             self.broadcast('Bot restarted')
