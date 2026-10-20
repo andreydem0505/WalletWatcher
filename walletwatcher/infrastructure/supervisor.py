@@ -8,9 +8,9 @@ import sys
 import threading
 import time
 
-from runtime import InstanceLock, configure_logging, in_docker
+from walletwatcher.config import ROOT
+from walletwatcher.infrastructure.runtime import InstanceLock, configure_logging, in_docker
 
-ROOT = Path(__file__).resolve().parent
 logger = logging.getLogger(__name__)
 
 
@@ -80,7 +80,7 @@ def main():
         return 78
     # Validate before starting a child: configuration errors cannot be repaired
     # by repeatedly restarting the same process.
-    from config import Config, ConfigError
+    from walletwatcher.config import Config, ConfigError
     try:
         config = Config.from_env()
     except ConfigError as error:
@@ -93,7 +93,7 @@ def main():
     heartbeat = Path(os.getenv('WALLETWATCHER_HEARTBEAT', '/tmp/walletwatcher-heartbeat'))
     with InstanceLock(config.wallets_file.parent / 'supervisor.lock'):
         try:
-            return supervise([sys.executable, str(ROOT / 'bot.py')], stop,
+            return supervise([sys.executable, '-m', 'walletwatcher.app'], stop,
                              heartbeat, config.watchdog_timeout)
         finally:
             heartbeat.unlink(missing_ok=True)

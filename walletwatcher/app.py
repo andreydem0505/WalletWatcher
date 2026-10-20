@@ -4,6 +4,7 @@ from html import escape
 import copy
 import logging
 import os
+import queue
 import signal
 import threading
 import time
@@ -11,16 +12,39 @@ import time
 import telebot
 from telebot import apihelper
 
-from config import Config, ConfigError
-from data_fetcher import DataFetchError, HyperliquidClient
-from delivery import DeliveryQueue
-from format import on_change_message
-from models import Account, TradeAction
-from runtime import InstanceLock, WorkerSupervisor, configure_logging, in_docker
-from serialization import load_accounts, normalize_wallet, save_wallets, validate_tag
+from walletwatcher.config import Config, ConfigError
+from walletwatcher.storage.credentials import CredentialsStore
+from walletwatcher.hyperliquid.client import DataFetchError, HyperliquidClient
+from walletwatcher.storage.delivery import DeliveryQueue
+from walletwatcher.presentation.formatting import on_change_message
+from walletwatcher.domain.models import Account, TradeAction
+from walletwatcher.presentation.portfolio import portfolio_messages
+from walletwatcher.infrastructure.runtime import InstanceLock, WorkerSupervisor, configure_logging, in_docker, redact_secrets
+from walletwatcher.storage.wallets import load_accounts, normalize_wallet, save_wallets, validate_tag
 
 logger = logging.getLogger(__name__)
 MOSCOW = timezone(timedelta(hours=3))
+HELP_TEXT = (
+    'Доступные команды:\n\n'
+    '/help — показать эту справку. Без аргументов.\n\n'
+    '/addwallet <address> — добавить кошелёк в мониторинг.\n\n'
+    '/removewallet <address> — удалить кошелёк из мониторинга.\n\n'
+    '/settag <address> <tag> — задать имя отслеживаемого кошелька. '
+    'Имя может содержать пробелы: до 100 символов, без точки с запятой и переносов строки.\n\n'
+    '/creds <address> <private_key> — сохранить или заменить адрес своего торгового '
+    'аккаунта и приватный ключ API wallet, привязав их к вашему Telegram ID. '
+    'Только в личном чате с ботом.\n\n'
+    '/my — показать баланс и открытые позиции своего аккаунта: маржу, цены, '
+    'P&L, funding и установленные TP/SL. Без аргументов; только в личном чате. '
+    'Сначала сохраните данные через /creds.\n\n'
+    '<address> — адрес кошелька вида 0x…; для /creds укажите адрес торгового '
+    'аккаунта, а не API wallet.\n'
+    '<private_key> — приватный ключ API/agent wallet, не основного кошелька.\n'
+    '<tag> — имя кошелька.\n'
+    'Аргументы в <…> обязательны: замените их своими значениями без скобок.\n\n'
+    'Любое другое сообщение показывает состояние мониторинга, список кошельков, '
+    'время последних успешных проверок, число ошибок и ожидающих уведомлений.'
+)
 
 
 class Application:
@@ -33,9 +57,15 @@ class Application:
             config.chat_interval, config.global_interval)
         self.stop = threading.Event()
         self.lock = threading.RLock()
+        self.personal_queue = queue.Queue(maxsize=32)
+        self.personal_pending = set()
+        self.personal_lock = threading.Lock()
         self.accounts = load_accounts(config.wallets_file)
         self.last_cycle = None
         self.outbox.bind_bot(config.token.split(':', 1)[0])
+        self.credentials = CredentialsStore(
+            self.outbox.db, self.outbox.lock, config.token.split(':', 1)[0],
+            config.database_file.with_name('credentials.key'))
         self.offset = int(self.outbox.get_metadata('telegram_offset', 0))
         self.outbox.prune(self.accounts, config.recipients, config.chat_ids)
 
@@ -52,17 +82,120 @@ class Application:
         chat = message.chat.id
         if chat not in self.config.chat_ids or not isinstance(message.text, str):
             return
+        args = message.text.split()
+        command = args[0].split('@', 1)[0].lower() if args else ''
+        if command in ('/creds', '/my'):
+            self.personal_command(message, command, args)
+            return
         try:
             self._command(chat, message.text)
         except ValueError as error:
-            self.reply(chat, str(error))
+            self.reply(chat, redact_secrets(str(error)))
         except Exception:
             logger.exception('Command failed in chat %s', chat)
             self.reply(chat, 'Command failed; no success was confirmed. Please retry.')
 
+    def delete_credentials_message(self, message):
+        message_id = getattr(message, 'message_id', None)
+        if message_id is None:
+            return False
+        try:
+            return bool(self.bot.delete_message(message.chat.id, message_id, timeout=10))
+        except Exception as error:
+            # Never render an exception or the inbound command containing a key.
+            result = getattr(error, 'result_json', None)
+            if isinstance(result, dict) and result.get('error_code') == 429:
+                try:
+                    delay = float(result.get('parameters', {}).get('retry_after', 30))
+                    if not 0 < delay < float('inf'):
+                        raise ValueError()
+                except (AttributeError, TypeError, ValueError):
+                    delay = 30
+                self.outbox.defer_global(delay + 1)
+            logger.warning('Could not delete credentials message (%s)', type(error).__name__)
+            return False
+
+    def personal_command(self, message, command, args):
+        chat = message.chat.id
+        deleted = self.delete_credentials_message(message) if command == '/creds' else False
+        user_id = getattr(getattr(message, 'from_user', None), 'id', None)
+        if (getattr(message.chat, 'type', None) != 'private' or type(user_id) is not int
+                or user_id <= 0 or chat != user_id):
+            self.reply(chat, 'Команды /creds и /my доступны только в личном чате с ботом.')
+            return
+        try:
+            if command == '/creds':
+                if len(args) != 3:
+                    raise ValueError('Использование: /creds <address> <private key API wallet>')
+                self.credentials.save(user_id, args[1], args[2])
+                response = 'Данные аккаунта сохранены и привязаны к вашему Telegram ID. Позиции: /my'
+                if not deleted:
+                    response += '\nСообщение с ключом удалить не удалось — удалите его вручную.'
+                self.reply(chat, response)
+                return
+            if len(args) != 1:
+                raise ValueError('Использование: /my')
+            address = self.credentials.get_address(user_id)
+            if address is None:
+                self.reply(chat, 'Данные аккаунта ещё не сохранены. Используйте /creds <address> <private key API wallet>.')
+                return
+            with self.personal_lock:
+                if user_id in self.personal_pending:
+                    return  # Repeated /my shares the already queued fresh result.
+                try:
+                    self.personal_queue.put_nowait((chat, user_id, address))
+                except queue.Full:
+                    self.reply(chat, 'Очередь запросов /my заполнена. Повторите попытку позже.')
+                    return
+                self.personal_pending.add(user_id)
+        except ValueError as error:
+            self.reply(chat, redact_secrets(str(error)))
+        except Exception as error:
+            logger.error('Personal command %s failed for user %s (%s)', command, user_id, type(error).__name__)
+            self.reply(chat, 'Команда не выполнена. Повторите попытку позже.')
+
+    def process_personal_request(self, timeout=0):
+        try:
+            chat, user_id, address = self.personal_queue.get(timeout=timeout)
+        except queue.Empty:
+            return False
+        try:
+            if self.stop.is_set():
+                return True
+            portfolio = self.client.fetch_portfolio(address)
+            if self.stop.is_set():
+                return True
+            if self.credentials.get_address(user_id) != address:
+                self.reply(chat, 'Данные аккаунта изменились. Повторите /my.')
+            else:
+                for text in portfolio_messages(portfolio):
+                    self.outbox.enqueue(chat, text, html=True)
+        except DataFetchError:
+            logger.warning('Personal account request failed for user %s', user_id)
+            self.reply(chat, 'Не удалось получить свежие данные Hyperliquid. Повторите /my позже.')
+        except Exception as error:
+            logger.error('Personal request failed for user %s (%s)', user_id, type(error).__name__)
+            self.reply(chat, 'Команда не выполнена. Повторите попытку позже.')
+        finally:
+            with self.personal_lock:
+                self.personal_pending.discard(user_id)
+            self.personal_queue.task_done()
+        return True
+
+    def personal_worker(self, heartbeat):
+        self.client.set_heartbeat(heartbeat)
+        while not self.stop.is_set():
+            heartbeat()
+            self.process_personal_request(timeout=0.2)
+
     def _command(self, chat, text):
         args = text.split()
         command = args[0].split('@', 1)[0].lower() if args else ''
+        if command == '/help':
+            if len(args) != 1:
+                raise ValueError('Использование: /help')
+            self.reply(chat, HELP_TEXT)
+            return
         if command in ('/addwallet', '/removewallet', '/settag'):
             expected = 3 if command == '/settag' else 2
             if len(args) < expected or (expected == 2 and len(args) != 2):
@@ -146,7 +279,7 @@ class Application:
             account.next_poll = time.monotonic() + self.config.poll_interval
 
     def monitor(self, heartbeat):
-        self.client.heartbeat = heartbeat
+        self.client.set_heartbeat(heartbeat)
         while not self.stop.is_set():
             heartbeat()
             with self.lock:
@@ -171,6 +304,7 @@ class Application:
             self.stop.wait(1)  # Also wait when there are no wallets.
 
     def polling(self, heartbeat):
+        self.client.set_heartbeat(heartbeat)
         failures = 0
         while not self.stop.is_set():
             heartbeat()
@@ -221,6 +355,7 @@ class Application:
         supervisor.add('monitor', self.monitor)
         supervisor.add('delivery', lambda beat: self.outbox.run(self.stop, beat))
         supervisor.add('polling', self.polling)
+        supervisor.add('personal', self.personal_worker)
         heartbeat_path = os.getenv('WALLETWATCHER_HEARTBEAT')
         try:
             self.broadcast('Bot restarted')

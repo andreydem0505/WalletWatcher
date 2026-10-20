@@ -5,10 +5,10 @@ from types import SimpleNamespace
 import unittest
 from unittest.mock import Mock
 
-from bot import Application
-from config import Config
-from delivery import DeliveryQueue
-from models import Position, Trade
+from walletwatcher.app import Application
+from walletwatcher.config import Config
+from walletwatcher.storage.delivery import DeliveryQueue
+from walletwatcher.domain.models import Position, Trade
 
 WALLET = '0x' + 'a' * 40
 OTHER = '0x' + 'b' * 40

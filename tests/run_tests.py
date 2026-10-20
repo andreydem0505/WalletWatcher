@@ -21,7 +21,7 @@ def main():
     if args.coverage:
         from coverage import Coverage
         coverage = Coverage(
-            branch=True, source=[str(ROOT)], omit=[str(TESTS / '*')],
+            branch=True, source=[str(ROOT / 'walletwatcher')],
             data_file=os.getenv('COVERAGE_FILE', str(Path(tempfile.gettempdir()) / 'walletwatcher.coverage')))
         coverage.start()
     try:

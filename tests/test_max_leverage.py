@@ -2,8 +2,8 @@
 from dataclasses import replace
 import unittest
 
-from format import format_position, on_change_message
-from models import Account, Trade
+from walletwatcher.presentation.formatting import format_position, on_change_message
+from walletwatcher.domain.models import Account, Trade
 
 
 class MaxLeverageTests(unittest.TestCase):
@@ -44,7 +44,16 @@ class MaxLeverageTests(unittest.TestCase):
         self.assertIn('Volume: $100K 👑\n', self.message(account))
         account.update(self.trade(timestamp=2000),
                        [replace(self.position(), size=-2, volume=200000)])
-        self.assertIn('Volume: $200K (+$100K) 👈👑\n', self.message(account))
+        self.assertIn('Volume: $200K 👑 (+$100K) 👈\n', self.message(account))
+
+    def test_crown_precedes_negative_volume_delta(self):
+        for maximum, badge in ((40, ' 👑'), (50, '')):
+            with self.subTest(maximum=maximum):
+                before = replace(self.position(maximum=maximum), volume=37160)
+                after = replace(before, size=-0.94, volume=35100)
+                account = Account(positions=[before])
+                account.update(self.trade(), [after])
+                self.assertIn(f'Volume: $35.1K{badge} (-$2.06K) 👈\n', self.message(account))
 
     def test_crown_tracks_current_leverage_and_preserves_arrow(self):
         account = Account(positions=[self.position(leverage=20)])

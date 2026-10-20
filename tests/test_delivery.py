@@ -14,14 +14,14 @@ class DeliveryBehaviorTests(ApplicationFixture):
     def test_bad_request_retries_after_one_hour(self):
         self.sender.send_message.side_effect = self.error(400)
         self.queue.enqueue(1, 'alert')
-        with self.assertLogs('delivery', level='WARNING'):
+        with self.assertLogs('walletwatcher.storage.delivery', level='WARNING'):
             self.assertTrue(self.queue.deliver_once())
         self.assertEqual(self.jobs()[0]['due'], self.clock() + 3600)
 
     def test_invalid_token_defers_all_recipients_for_five_minutes(self):
         self.sender.send_message.side_effect = self.error(401)
         self.queue.enqueue(1, 'alert')
-        with self.assertLogs('delivery', level='ERROR'):
+        with self.assertLogs('walletwatcher.storage.delivery', level='ERROR'):
             self.assertTrue(self.queue.deliver_once())
         self.assertEqual(self.jobs()[0]['due'], self.clock() + 300)
         self.queue.enqueue(2, 'another chat')
@@ -31,7 +31,7 @@ class DeliveryBehaviorTests(ApplicationFixture):
         self.sender.send_message.side_effect = ConnectionError('offline')
         self.queue.enqueue(1, 'alert', key='persistent')
         for attempt in range(1, 11):
-            with self.assertLogs('delivery', level='WARNING'):
+            with self.assertLogs('walletwatcher.storage.delivery', level='WARNING'):
                 self.assertTrue(self.queue.deliver_once())
             job = self.queue.db.execute('SELECT * FROM outbox').fetchone()
             delay = min(300, 2 ** attempt)

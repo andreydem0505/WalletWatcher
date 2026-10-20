@@ -16,15 +16,15 @@ import requests
 import telebot
 from telebot import apihelper
 
-from bot import Application
-from config import Config, ConfigError
-from data_fetcher import DataFetchError, HyperliquidClient
-from delivery import DeliveryQueue, OutboxFull
-from format import format_number, format_position, on_change_message
-from models import Account, Position, Trade
-from runtime import InstanceLock, RedactingFormatter, WorkerSupervisor
-from serialization import load_accounts, save_wallets
-from supervisor import supervise
+from walletwatcher.app import Application
+from walletwatcher.config import Config, ConfigError
+from walletwatcher.hyperliquid.client import DataFetchError, HyperliquidClient
+from walletwatcher.storage.delivery import DeliveryQueue, OutboxFull
+from walletwatcher.presentation.formatting import format_number, format_position, on_change_message
+from walletwatcher.domain.models import Account, Position, Trade
+from walletwatcher.infrastructure.runtime import InstanceLock, RedactingFormatter, WorkerSupervisor
+from walletwatcher.storage.wallets import load_accounts, save_wallets
+from walletwatcher.infrastructure.supervisor import supervise
 
 WALLET = '0x' + 'a' * 40
 OTHER = '0x' + 'b' * 40
@@ -365,7 +365,7 @@ class ModelAndStorageTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as directory:
             path = Path(directory) / 'wallets.txt'
             save_wallets({WALLET: Account('old')}, path)
-            with patch('serialization.os.replace', side_effect=OSError('disk error')):
+            with patch('walletwatcher.storage.wallets.os.replace', side_effect=OSError('disk error')):
                 with self.assertRaises(OSError):
                     save_wallets({OTHER: Account('new')}, path)
             self.assertEqual(load_accounts(path)[WALLET].tag, 'old')
@@ -437,7 +437,7 @@ class ApplicationTests(unittest.TestCase):
             self.assertNotIn('<>&', job['text'])
 
     def test_command_write_failure_does_not_change_live_state(self):
-        with patch('bot.save_wallets', side_effect=OSError('disk full')):
+        with patch('walletwatcher.app.save_wallets', side_effect=OSError('disk full')):
             self.app.handle_message(self.message(f'/addwallet {WALLET}'))
         self.assertFalse(self.app.accounts)
 
@@ -509,7 +509,7 @@ class ApplicationTests(unittest.TestCase):
             return outcome
 
         self.bot.get_updates.side_effect = fetch
-        with patch('bot.time.monotonic', side_effect=lambda: time.perf_counter() * 10000):
+        with patch('walletwatcher.app.time.monotonic', side_effect=lambda: time.perf_counter() * 10000):
             self.app.polling(lambda: None)
         self.assertEqual(self.app.outbox.get_metadata('telegram_offset'), '124')
 
@@ -602,7 +602,7 @@ class ConfigurationTests(unittest.TestCase):
 
     def test_invalid_environment_and_intervals(self):
         environment = dict(BOT_TOKEN='12345:test', CHAT_IDS='1,2,1', ADMIN_ID='1', MODE='TEST')
-        with patch('config.load_dotenv'), patch.dict(os.environ, environment, clear=True):
+        with patch('walletwatcher.config.load_dotenv'), patch.dict(os.environ, environment, clear=True):
             config = Config.from_env()
             self.assertEqual(config.recipients, (1,))
             self.assertEqual(config.chat_ids, (1, 2))

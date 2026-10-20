@@ -13,10 +13,16 @@ def in_docker():
     return Path('/.dockerenv').is_file()
 
 
+def redact_secrets(text):
+    text = re.sub(r'\d{5,}:[A-Za-z0-9_-]+', '<BOT_TOKEN>', text)
+    return re.sub(r'(?<![0-9a-fA-F])(?:0[xX])?[0-9a-fA-F]{64}(?![0-9a-fA-F])',
+                  '<PRIVATE_KEY>', text)
+
+
 class RedactingFormatter(logging.Formatter):
     def format(self, record):
         # Redact the rendered traceback too: requests exceptions contain URLs.
-        return re.sub(r'\d{5,}:[A-Za-z0-9_-]+', '<BOT_TOKEN>', super().format(record))
+        return redact_secrets(super().format(record))
 
 
 def configure_logging(path=None):

@@ -6,10 +6,10 @@ from unittest.mock import Mock
 
 import requests
 
-from config import ConfigError, parse_perp_dexs
-from data_fetcher import DataFetchError, HyperliquidClient
-from format import format_position, on_change_message
-from models import Account, Trade
+from walletwatcher.config import ConfigError, parse_perp_dexs
+from walletwatcher.hyperliquid.client import DataFetchError, HyperliquidClient
+from walletwatcher.presentation.formatting import format_position, on_change_message
+from walletwatcher.domain.models import Account, Trade
 
 
 def state(coin='BTC', size='0.62274', entry='85062.3'):

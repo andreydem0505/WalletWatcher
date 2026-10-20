@@ -5,10 +5,10 @@ from unittest.mock import Mock, patch
 
 from telebot import apihelper
 
-import bot
-from config import ConfigError
-from models import Account
-import supervisor
+from walletwatcher import app as bot
+from walletwatcher.config import ConfigError
+from walletwatcher.domain.models import Account
+from walletwatcher.infrastructure import supervisor
 from support import ApplicationFixture, WALLET
 
 
@@ -18,14 +18,14 @@ class LifecycleTests(ApplicationFixture):
             with self.subTest(module=module.__name__), \
                     patch.object(module, 'in_docker', return_value=True), \
                     patch.object(module, 'configure_logging'), \
-                    patch('config.Config.from_env', side_effect=ConfigError('bad configuration')), \
+                    patch('walletwatcher.config.Config.from_env', side_effect=ConfigError('bad configuration')), \
                     patch.object(module.logger, 'error'):
                 self.assertEqual(module.main(), 78)
 
     def test_bot_entrypoint_sets_timeouts_takes_lock_and_runs(self):
         with patch.object(bot, 'in_docker', return_value=True), \
                 patch.object(bot, 'configure_logging'), \
-                patch('config.Config.from_env', return_value=self.config), \
+                patch('walletwatcher.config.Config.from_env', return_value=self.config), \
                 patch.object(bot.signal, 'signal'), \
                 patch.object(bot, 'Application') as application, \
                 patch.object(apihelper, 'CONNECT_TIMEOUT'), \
@@ -40,7 +40,7 @@ class LifecycleTests(ApplicationFixture):
         self.assertTrue((self.root / 'bot.lock').is_file())
 
     def test_orphaned_bot_stops_workers_and_closes_resources(self):
-        with patch('bot.WorkerSupervisor') as workers, \
+        with patch('walletwatcher.app.WorkerSupervisor') as workers, \
                 patch.dict(os.environ, {'WALLETWATCHER_PARENT_PID': str(os.getppid() + 1)}), \
                 patch.object(self.app.stop, 'wait', return_value=False):
             workers.return_value.join.return_value = True
@@ -66,8 +66,8 @@ class LifecycleTests(ApplicationFixture):
         stop = Mock()
         stop.is_set.return_value = False
         stop.wait.return_value = False
-        with patch('supervisor.subprocess.Popen', side_effect=[OSError('cannot spawn'), process]) as spawn, \
-                self.assertLogs('supervisor', level='ERROR'):
+        with patch('walletwatcher.infrastructure.supervisor.subprocess.Popen', side_effect=[OSError('cannot spawn'), process]) as spawn, \
+                self.assertLogs('walletwatcher.infrastructure.supervisor', level='ERROR'):
             self.assertEqual(supervisor.supervise(['bot'], stop, self.root / 'heartbeat'), 0)
         self.assertEqual(spawn.call_count, 2)
         stop.wait.assert_called_once_with(2)
@@ -76,7 +76,7 @@ class LifecycleTests(ApplicationFixture):
         self.app.accounts = {WALLET: Account(next_poll=self.clock() + 60)}
         with patch.object(self.app.stop, 'is_set', side_effect=[False, False, True]), \
                 patch.object(self.app.stop, 'wait'), \
-                patch('bot.time.monotonic', self.clock):
+                patch('walletwatcher.app.time.monotonic', self.clock):
             self.app.monitor(Mock())
         self.client.fetch_open_positions.assert_not_called()
 
@@ -98,7 +98,7 @@ class PollingCooldownTests(ApplicationFixture):
             self.assertGreaterEqual(self.clock(), deadline)
             return self.stop_polling(**kwargs)
         self.sender.get_updates.side_effect = fetch
-        with patch('bot.time.time', self.clock), \
+        with patch('walletwatcher.app.time.time', self.clock), \
                 patch.object(self.app.stop, 'wait', side_effect=self.advance_time):
             self.app.polling(heartbeat)
         self.sender.get_updates.assert_called_once()
@@ -114,9 +114,9 @@ class PollingCooldownTests(ApplicationFixture):
             self.assertGreaterEqual(self.clock(), started + 3)
             return self.stop_polling(**kwargs)
         self.sender.get_updates.side_effect = fetch
-        with patch('bot.time.time', self.clock), patch('bot.time.monotonic', self.clock), \
+        with patch('walletwatcher.app.time.time', self.clock), patch('walletwatcher.app.time.monotonic', self.clock), \
                 patch.object(self.app.stop, 'wait', side_effect=self.advance_time), \
-                self.assertLogs('bot', level='WARNING'):
+                self.assertLogs('walletwatcher.app', level='WARNING'):
             self.app.polling(Mock())
         self.assertEqual(self.sender.get_updates.call_count, 2)
         self.assertEqual(float(self.queue.get_metadata('telegram_flood_until')), started + 3)

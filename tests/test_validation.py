@@ -8,10 +8,10 @@ from unittest.mock import Mock, patch
 
 import requests
 
-from config import Config, ConfigError
-from data_fetcher import DataFetchError, HyperliquidClient
-from models import Account
-from serialization import load_accounts, save_wallets, validate_tag
+from walletwatcher.config import Config, ConfigError
+from walletwatcher.hyperliquid.client import DataFetchError, HyperliquidClient
+from walletwatcher.domain.models import Account
+from walletwatcher.storage.wallets import load_accounts, save_wallets, validate_tag
 from support import WALLET, OTHER
 
 
@@ -45,7 +45,7 @@ class APIValidationTests(unittest.TestCase):
 
     def test_retry_after_fallbacks_and_http_dates_use_bounded_positive_delays(self):
         date = format_datetime(datetime.fromtimestamp(1120, timezone.utc), usegmt=True)
-        with patch('data_fetcher.time.time', return_value=1000):
+        with patch('walletwatcher.hyperliquid.client.time.time', return_value=1000):
             self.assertEqual(HyperliquidClient.retry_delay(date), 120)
             for invalid in ('bad date', None, 'nan', 'inf'):
                 self.assertEqual(HyperliquidClient.retry_delay(invalid), 30)
@@ -57,7 +57,7 @@ class FileAndConfigValidationTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as directory:
             path = Path(directory) / 'wallets.txt'
             path.write_text(f'\ufeff# comment\n{WALLET.upper()};first\n{WALLET};last\n{OTHER};bad;tag\n')
-            with self.assertLogs('serialization', level='WARNING'):
+            with self.assertLogs('walletwatcher.storage.wallets', level='WARNING'):
                 accounts = load_accounts(path)
             self.assertEqual(set(accounts), {WALLET})
             self.assertEqual(accounts[WALLET].tag, 'last')
@@ -66,7 +66,7 @@ class FileAndConfigValidationTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as directory:
             path = Path(directory) / 'wallets.txt'
             save_wallets({WALLET: Account('original')}, path)
-            with patch('serialization.os.fsync', side_effect=OSError('disk failure')):
+            with patch('walletwatcher.storage.wallets.os.fsync', side_effect=OSError('disk failure')):
                 with self.assertRaises(OSError):
                     save_wallets({OTHER: Account('new')}, path)
             self.assertEqual(load_accounts(path)[WALLET].tag, 'original')
@@ -80,7 +80,7 @@ class FileAndConfigValidationTests(unittest.TestCase):
 
     def test_default_prod_mode_deduplicates_recipients_and_rejects_zero_ids(self):
         environment = dict(BOT_TOKEN='12345:test', CHAT_IDS='1,2,1', ADMIN_ID='1')
-        with patch('config.load_dotenv'), patch.dict('os.environ', environment, clear=True):
+        with patch('walletwatcher.config.load_dotenv'), patch.dict('os.environ', environment, clear=True):
             config = Config.from_env()
             self.assertEqual(config.recipients, (1, 2))
             self.assertEqual(config.mode, 'PROD')

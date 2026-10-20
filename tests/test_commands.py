@@ -3,12 +3,37 @@ from dataclasses import replace
 from datetime import datetime, timezone
 from unittest.mock import patch
 
-from models import Account
-from serialization import load_accounts, save_wallets
+from walletwatcher.domain.models import Account
+from walletwatcher.storage.wallets import load_accounts, save_wallets
 from support import ApplicationFixture, WALLET, OTHER
 
 
 class CommandBehaviorTests(ApplicationFixture):
+    def test_help_explains_all_commands_and_replies_only_to_requesting_chat(self):
+        self.app.config = replace(self.config, mode='TEST')
+        for command in ('/help', '/HELP@wallet_bot'):
+            self.app.handle_message(self.message(command, chat=2))
+            job = self.jobs()[-1]
+            self.assertEqual(job['chat'], 2)
+            self.assertFalse(job['html'])  # Argument placeholders remain literal text.
+            for syntax in ('/help', '/addwallet <address>', '/removewallet <address>',
+                           '/settag <address> <tag>', '/creds <address> <private_key>', '/my'):
+                self.assertIn(syntax, job['text'])
+            self.assertIn('Только в личном чате', job['text'])
+            self.assertIn('до 100 символов', job['text'])
+            self.assertIn('Любое другое сообщение', job['text'])
+            self.assertLessEqual(len(job['text']), 1500)
+        self.assertEqual(len(self.jobs()), 2)
+        self.assertFalse(self.config.wallets_file.exists())
+        self.assertTrue(self.app.personal_queue.empty())
+        self.client.fetch_portfolio.assert_not_called()
+
+    def test_help_rejects_arguments_and_respects_chat_allowlist(self):
+        self.app.handle_message(self.message('/help', chat=999))
+        self.assertEqual(self.queue.pending_count(), 0)
+        self.app.handle_message(self.message('/help unexpected'))
+        self.assertEqual(self.jobs()[0]['text'], 'Использование: /help')
+
     def test_status_dates_use_moscow_seconds_without_timezone(self):
         timestamp = datetime(2026, 10, 17, 22, 34, 56, 987654, tzinfo=timezone.utc).timestamp()
         self.app.last_cycle = timestamp
@@ -57,7 +82,7 @@ class CommandBehaviorTests(ApplicationFixture):
         account = Account('original')
         self.app.accounts = {WALLET: account}
         save_wallets(self.app.accounts, self.config.wallets_file)
-        with patch('bot.save_wallets', side_effect=OSError('disk full')), self.assertLogs('bot', level='ERROR'):
+        with patch('walletwatcher.app.save_wallets', side_effect=OSError('disk full')), self.assertLogs('walletwatcher.app', level='ERROR'):
             self.app.handle_message(self.message(f'/settag {WALLET} changed'))
         self.assertIs(self.app.accounts[WALLET], account)
         self.assertEqual(account.tag, 'original')

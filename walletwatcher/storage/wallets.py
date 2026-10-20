@@ -5,10 +5,11 @@ from pathlib import Path
 import re
 import tempfile
 
-from models import Account
+from walletwatcher.config import ROOT
+from walletwatcher.domain.models import Account
 
 logger = logging.getLogger(__name__)
-WALLETS_FILE = Path(__file__).resolve().parent / 'wallets.txt'
+WALLETS_FILE = ROOT / 'wallets.txt'
 
 
 def normalize_wallet(wallet: str) -> str:

@@ -3,8 +3,8 @@ from dataclasses import replace
 import unittest
 from unittest.mock import patch
 
-from data_fetcher import DataFetchError
-from models import Account
+from walletwatcher.hyperliquid.client import DataFetchError
+from walletwatcher.domain.models import Account
 from support import ApplicationFixture, WALLET, position, trade
 
 
@@ -137,7 +137,7 @@ class MonitoringTests(ApplicationFixture):
     def test_success_resets_failure_count_and_sets_next_poll(self):
         account = self.track([])
         account.failures = 5
-        with patch('bot.time.time', return_value=1000), patch('bot.time.monotonic', return_value=200):
+        with patch('walletwatcher.app.time.time', return_value=1000), patch('walletwatcher.app.time.monotonic', return_value=200):
             self.poll(account, [])
         self.assertEqual(account.failures, 0)
         self.assertEqual(account.last_updated, 1000)

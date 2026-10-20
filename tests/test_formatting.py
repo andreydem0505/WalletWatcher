@@ -2,8 +2,8 @@
 from dataclasses import replace
 import unittest
 
-from format import format_position, format_trade, on_change_message
-from models import Account, Trade
+from walletwatcher.presentation.formatting import format_position, format_trade, on_change_message
+from walletwatcher.domain.models import Account, Trade
 from support import WALLET, position, trade
 
 

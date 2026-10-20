@@ -5,8 +5,8 @@ them together with the documented monitoring limits.
 """
 from unittest.mock import Mock
 
-from data_fetcher import HyperliquidClient
-from models import Account
+from walletwatcher.hyperliquid.client import HyperliquidClient
+from walletwatcher.domain.models import Account
 from support import ApplicationFixture, WALLET, position, trade
 
 

@@ -14,7 +14,7 @@ RUN python -m pip install --no-cache-dir -r requirements.txt \
     && useradd --uid 10001 --gid 10001 --no-create-home walletwatcher \
     && mkdir /data \
     && chown walletwatcher:walletwatcher /data
-COPY *.py ./
+COPY walletwatcher/ ./walletwatcher/
 USER 10001:10001
 
 FROM base AS test
@@ -28,5 +28,5 @@ CMD ["python", "-B", "tests/run_tests.py"]
 FROM base AS runtime
 VOLUME ["/data"]
 HEALTHCHECK --interval=30s --timeout=5s --start-period=60s --retries=3 \
-    CMD ["python", "healthcheck.py"]
-CMD ["python", "supervisor.py"]
+    CMD ["python", "-m", "walletwatcher.infrastructure.healthcheck"]
+CMD ["python", "-m", "walletwatcher.infrastructure.supervisor"]

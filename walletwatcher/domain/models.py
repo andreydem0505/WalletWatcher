@@ -3,7 +3,7 @@ from dataclasses import dataclass, field
 from typing import Optional
 from uuid import uuid4
 
-from utils import more_than_hour_ago
+from walletwatcher.domain.utils import more_than_hour_ago
 
 
 @dataclass(frozen=True)

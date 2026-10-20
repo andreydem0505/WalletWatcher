@@ -5,11 +5,11 @@ import sys
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
-from config import parse_perp_dexs
-from data_fetcher import HyperliquidClient
-from format import on_change_message
-from models import Account
-from serialization import normalize_wallet
+from walletwatcher.config import parse_perp_dexs
+from walletwatcher.hyperliquid.client import HyperliquidClient
+from walletwatcher.presentation.formatting import on_change_message
+from walletwatcher.domain.models import Account
+from walletwatcher.storage.wallets import normalize_wallet
 
 
 def main():

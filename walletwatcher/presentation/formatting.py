@@ -3,7 +3,7 @@ import math
 from html import escape
 from urllib.parse import quote
 
-from models import Account, Position, Trade
+from walletwatcher.domain.models import Account, Position, Trade
 
 
 def number(value) -> float:
@@ -78,7 +78,7 @@ def on_change_message(wallet: str, account: Account) -> str:
             if pos.delta else ''
         )
         if pos.max_leverage is not None and pos.leverage == pos.max_leverage:
-            change += '👑' if change else ' 👑'
+            change = change + '👑' if pos.is_new else ' 👑' + change
         blocks.append(
             f'\n<b>{escape(pos.ticker)} {escape(pos.direction)} '
             f'{leverage} {escape(pos.leverage_type)}</b>\n'

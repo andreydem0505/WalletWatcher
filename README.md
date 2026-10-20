@@ -6,12 +6,34 @@ alert started, P&L, and a link to Hyperdash.
 
 ![Example of the alert](message.png)
 
+## Project structure
+
+```text
+walletwatcher/
+  app.py             Telegram commands and application workers
+  config.py          Environment configuration and project paths
+  domain/            Position models and time helpers
+  hyperliquid/       HTTP client and on-demand WebSocket snapshots
+  storage/           Wallet files, encrypted credentials and delivery queue
+  presentation/      Parsing and formatting of alerts and personal portfolios
+  infrastructure/    Logging, watchdogs, process supervisor and health check
+tests/               Offline regression tests and an opt-in live API check
+```
+
+Docker copies the `walletwatcher` package into `/app` and starts
+`python -m walletwatcher.infrastructure.supervisor`; the supervisor starts the
+bot with `python -m walletwatcher.app`. The health check runs as
+`python -m walletwatcher.infrastructure.healthcheck`. Compose commands are
+unchanged. `.env` stays in the repository root, while the configured persistent
+data paths and volume contents stay unchanged.
+
 ## Setup
 
 The application runs **only in Docker**. Install Docker Engine with Compose
 2.24+ on Linux, or Docker Desktop on macOS/Windows. No local Python environment
 is required. The image uses Python 3.12, pinned application dependencies, and a
-non-root user (UID/GID 10001). Direct host launches of `bot.py` and `supervisor.py`
+non-root user (UID/GID 10001). Direct host launches of `walletwatcher.app` and
+`walletwatcher.infrastructure.supervisor`
 are rejected before configuration is loaded or network requests are made.
 
 ```sh
@@ -107,14 +129,100 @@ volumes cannot coordinate Telegram polling.
 
 Commands:
 
+- `/help` — list available commands, required arguments and their meanings;
+  personal-only commands are marked explicitly. Replies go to the requesting chat.
 - `/addwallet 0x...`
 - `/removewallet 0x...`
 - `/settag 0x... some tag` (at most 100 characters, without semicolons/newlines)
+- `/creds <address> <private key API wallet>` (private chat only)
+- `/my` (private chat only)
 - Any other text shows wallets, per-wallet last successful update, failure
   counts and the number of queued notifications.
 
 Changes to wallets and tags are written immediately using a temporary file,
 `fsync` and atomic replacement. The command does not confirm success before saving.
+
+### Personal account commands
+
+Add your personal Telegram chat ID to `CHAT_IDS` to use these commands in a
+private conversation with the bot. Group chats cannot register credentials or
+request a personal portfolio. Credentials are bound to the authenticated
+`message.from_user.id` and the bot identity; replies go only to that user,
+including in `MODE=TEST`.
+
+`/creds <address> <private key API wallet>` saves or replaces your own account
+address and API/agent-wallet key. Use the actual trading account address, not
+the agent address. This stores credentials; it does not verify the agent's
+approval or ownership, and does not enable trading. The key is validated as a
+secp256k1 private key. Never send a seed phrase or the main wallet's key.
+
+The bot tries to delete the incoming credentials message, including rejected
+group messages in authorized chats. If deletion fails, the private confirmation
+asks you to remove it manually. Sending a secret as a Telegram command still
+passes it through Telegram; deleting the message does not make that transport
+an end-to-end encrypted secret channel. Use a dedicated, revocable API wallet.
+Keys are not echoed in replies or recorded as plaintext in the database/outbox.
+Application log formatting also redacts private-key-shaped strings.
+
+Credentials are encrypted with Fernet before being saved in `state.sqlite3`.
+The application creates `/data/credentials.key` on first registration with
+owner-only permissions (`0600`). It survives restarts in the persistent volume
+and must be backed up alongside the database and its WAL files. Do not delete
+or regenerate it after credentials have been saved. Encrypting the database
+does not protect against an attacker who can read both the database and this
+key file or control the running application.
+
+`/my` uses only your saved public address and fetches a fresh snapshot. Only
+when the command is requested, a dedicated supervised `personal` worker opens a WebSocket subscription to
+`allDexsClearinghouseState`, receives the main and HIP-3 account states together,
+and closes the connection before requesting prices and TP/SL for occupied DEXs.
+The account-mode request runs alongside the snapshot. Then prices, TP/SL and
+the unified-account balance (when applicable) load in parallel, with at most
+four request threads per command. Each HTTP thread owns a separate session;
+these sessions close when the command finishes. Personal API requests do not
+hold the monitor's HTTP connection lock. Both paths use one thread-safe IP
+weight budget and 429 cooldown; an API limit can still defer both paths.
+Telegram polling queues `/my` and continues accepting commands while the
+personal worker fetches the result. At most 32 requests can wait in memory;
+repeated `/my` from the same user shares that user's pending result. If the
+queue is full, the bot asks the user to retry later. A changed account address
+during fetching prevents the old portfolio from being sent. Requests awaiting
+collection are not persisted; repeat `/my` after a process restart. Once a
+result is queued for Telegram delivery, the existing durable outbox applies.
+No connection or background subscription is kept between commands. Connection
+setup has a 5-second timeout, snapshot collection a 20-second overall deadline,
+and closing the socket waits at most 1 second. At most 30 connection attempts
+per minute are allowed per client, including failed attempts. There is no
+automatic reconnect or fallback to a sequential DEX scan; repeat `/my` after a
+failure. This is independent of the monitor's `PERP_DEXS` filter and does not
+change monitoring. Spot positions are not listed. Long portfolios
+are split into multiple complete HTML messages, without omitting positions.
+An unavailable API or incomplete snapshot produces a retry message rather
+than a misleading partial portfolio.
+
+The displayed fields are:
+
+- `Balance`: sum of perpetual `marginSummary.accountValue` values in standard
+  mode. In unified/portfolio-margin mode it is the USDC `total` from
+  `spotClearinghouseState`, counted once; other collateral tokens are not
+  converted into dollars or added to this USDC balance.
+- `Margin`: the position's `marginUsed`, rather than its notional volume.
+- `Cur Price`: the fresh `markPx` from `metaAndAssetCtxs`.
+- `P&L`: `unrealizedPnl`; the percentage is `returnOnEquity * 100`, falling back
+  to P&L divided by margin when ROE is absent and margin is nonzero.
+- `Funding`: cash flow since the position opened, `-cumFunding.sinceOpen`.
+  Hyperliquid's accumulated funding uses positive values for costs paid and
+  negative values for funding received. The bot shows expenses as negative and
+  income as positive, for both long and short positions. Missing values are
+  shown as `N/A` rather than a fabricated zero.
+- `TP` and `SL`: trigger prices of matching active closing orders from
+  `frontendOpenOrders`. Opening/opposite-side orders are excluded. Absent TP/SL
+  lines are omitted; multiple configured levels are shown individually.
+
+References: [Hyperliquid account API](https://hyperliquid.gitbook.io/hyperliquid-docs/for-developers/api/info-endpoint/perpetuals),
+[WebSocket snapshots](https://hyperliquid.gitbook.io/hyperliquid-docs/for-developers/api/websocket/subscriptions),
+[frontend orders](https://hyperliquid.gitbook.io/hyperliquid-docs/for-developers/api/info-endpoint#retrieve-a-users-open-orders-with-additional-frontend-info),
+[account modes](https://hyperliquid.gitbook.io/hyperliquid-docs/trading/account-abstraction-modes).
 
 ## Telegram delivery and retry behaviour
 
@@ -151,7 +259,7 @@ and [retry_after documentation](https://core.telegram.org/bots/api#responseparam
   complete section boundaries to stay within Telegram's message limit.
 
 Do not remove `state.sqlite3` or its WAL files while the bot is running. Back up
-the wallet file and SQLite database when migrating an installation.
+the wallet file, SQLite database and `credentials.key` when migrating an installation.
 
 ## Recovery and deployment
 
@@ -159,9 +267,9 @@ Hyperliquid requests have connect/read timeouts of 5/15 seconds. HTTP status,
 JSON structure and numerical values are checked. A failed wallet receives its
 own retry delay and does not stop the rest of the monitoring cycle.
 
-Monitoring, polling and delivery use separate threads. Unexpected thread exits
+Monitoring, polling, personal commands and delivery use separate threads. Unexpected thread exits
 are restarted after five seconds. A stalled thread causes the process to exit;
-`supervisor.py` replaces it. The supervisor also watches a process heartbeat,
+`walletwatcher.infrastructure.supervisor` replaces it. The supervisor also watches a process heartbeat,
 terminates an unresponsive child, and kills it if graceful termination exceeds
 ten seconds. Restart delays grow from 2 to 60 seconds; after five minutes of
 stable operation the delay resets. A child exits if its supervisor disappears.
@@ -197,13 +305,13 @@ docker compose run --rm --no-deps -T --entrypoint python \
   -v "$PWD:/import:ro" walletwatcher - <<'PY'
 import shutil
 from pathlib import Path
-from runtime import InstanceLock
+from walletwatcher.infrastructure.runtime import InstanceLock
 
 source, target = Path('/import'), Path('/data')
 with InstanceLock(target / 'supervisor.lock'), InstanceLock(target / 'bot.lock'):
-    if (target / 'wallets.txt').exists() or any(target.glob('state.sqlite3*')):
+    if (target / 'wallets.txt').exists() or (target / 'credentials.key').exists() or any(target.glob('state.sqlite3*')):
         raise SystemExit('Destination already contains data')
-    files = [source / 'wallets.txt', *source.glob('state.sqlite3*')]
+    files = [source / 'wallets.txt', source / 'credentials.key', *source.glob('state.sqlite3*')]
     for path in files:
         if path.is_file():
             shutil.copy2(path, target / path.name)

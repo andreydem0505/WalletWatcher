@@ -2,8 +2,8 @@
 from dataclasses import replace
 import unittest
 
-from format import on_change_message
-from models import Account, Position, Trade
+from walletwatcher.presentation.formatting import on_change_message
+from walletwatcher.domain.models import Account, Position, Trade
 
 
 class PositionIdentityTests(unittest.TestCase):
