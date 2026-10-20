@@ -46,7 +46,7 @@ def load_accounts(path=WALLETS_FILE) -> dict[str, Account]:
 def save_wallets(accounts: dict[str, Account], path=WALLETS_FILE) -> None:
     path = Path(path)
     text = '\n'.join(f'{normalize_wallet(wallet)};{validate_tag(account.tag or "")}'
-                     for wallet, account in sorted(accounts.items()))
+                     for wallet, account in accounts.items())
     temporary = None
     try:
         with tempfile.NamedTemporaryFile(mode='w', encoding='utf-8', dir=path.parent,

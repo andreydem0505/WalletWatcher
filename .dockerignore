@@ -1,0 +1,13 @@
+# Include only inputs used by the runtime and test build stages.
+**
+!Dockerfile
+!requirements.txt
+!requirements-test.txt
+!walletwatcher/
+!walletwatcher/**/
+!walletwatcher/**/*.py
+!tests/
+!tests/**/
+!tests/**/*.py
+**/__pycache__/
+**/._*

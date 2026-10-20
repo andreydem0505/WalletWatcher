@@ -17,6 +17,7 @@ class AlertFormattingTests(unittest.TestCase):
         account.update(Trade('BTC', '80970.0', '0.6175', 'Open Short', 1000), [btc, ewz])
         self.assertEqual(on_change_message(WALLET, account), (
             '❗️ <b>BTC Open Short</b> ❗️\n<code>шортист SpaceX</code>\n'
+            f'<code>{WALLET}</code>\n'
             'Volume: $50K\nPrice: 80970.0\n\n'
             '<b>Current positions with changes since this alert started:</b>\n'
             '\n<b>BTC Short 40 cross</b>\nVolume: $100K 🆕👑\n'
@@ -24,6 +25,13 @@ class AlertFormattingTests(unittest.TestCase):
             '\n<b>xyz:EWZ Long 2 isolated</b>\nVolume: $25K\n'
             'Entry Price: 41.6058\nP&amp;L: +$269\n'
             '\nhttps://hyperdash.com/address/' + WALLET))
+
+    def test_untagged_wallet_is_shown_once_in_alert_header(self):
+        for tag in (None, ''):
+            with self.subTest(tag=tag):
+                text = on_change_message(WALLET, Account(tag=tag, positions=[], last_trade=trade()))
+                self.assertIn(f'❗️\n<code>{WALLET}</code>\nVolume:', text)
+                self.assertEqual(text.count(f'<code>{WALLET}</code>'), 1)
 
     def test_trade_and_position_volumes_are_not_multiplied_by_leverage(self):
         for leverage in (1, 40):

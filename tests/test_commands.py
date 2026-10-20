@@ -16,12 +16,14 @@ class CommandBehaviorTests(ApplicationFixture):
             job = self.jobs()[-1]
             self.assertEqual(job['chat'], 2)
             self.assertFalse(job['html'])  # Argument placeholders remain literal text.
-            for syntax in ('/help', '/addwallet <address>', '/removewallet <address>',
+            for syntax in ('/addwallet <address>', '/removewallet <address>',
                            '/settag <address> <tag>', '/creds <address> <private_key>', '/my'):
                 self.assertIn(syntax, job['text'])
-            self.assertIn('Только в личном чате', job['text'])
-            self.assertIn('до 100 символов', job['text'])
-            self.assertIn('Любое другое сообщение', job['text'])
+            self.assertNotIn('/help', job['text'])
+            self.assertNotRegex(job['text'], '[А-Яа-яЁё]')
+            self.assertIn('Only available in a private chat', job['text'])
+            self.assertIn('up to 100 characters', job['text'])
+            self.assertIn('Any other message', job['text'])
             self.assertLessEqual(len(job['text']), 1500)
         self.assertEqual(len(self.jobs()), 2)
         self.assertFalse(self.config.wallets_file.exists())
@@ -32,7 +34,7 @@ class CommandBehaviorTests(ApplicationFixture):
         self.app.handle_message(self.message('/help', chat=999))
         self.assertEqual(self.queue.pending_count(), 0)
         self.app.handle_message(self.message('/help unexpected'))
-        self.assertEqual(self.jobs()[0]['text'], 'Использование: /help')
+        self.assertEqual(self.jobs()[0]['text'], 'Usage: /help')
 
     def test_status_dates_use_moscow_seconds_without_timezone(self):
         timestamp = datetime(2026, 10, 17, 22, 34, 56, 987654, tzinfo=timezone.utc).timestamp()
@@ -48,7 +50,45 @@ class CommandBehaviorTests(ApplicationFixture):
     def test_empty_status_contains_no_spurious_wallet(self):
         self.app.handle_message(self.message(''))
         self.assertEqual(self.jobs()[0]['text'],
-                         'Last monitoring cycle: not yet\nPending notifications: 0\n\nTracked wallets:')
+                         'Wallets: 0\nLast monitoring cycle: not yet\nPending notifications: 0\n\nTracked wallets:')
+
+    def test_status_follows_current_file_order_and_keeps_monitoring_state(self):
+        third = '0x' + '1' * 40
+        self.app.accounts = {third: Account(), WALLET: Account(), OTHER: Account('live tag', failures=3)}
+        original = self.app.accounts[OTHER]
+        for order in ((OTHER, third, WALLET), (WALLET, OTHER, third)):
+            self.config.wallets_file.write_text('# Wallet order\n' + '\n'.join(f'{wallet};' for wallet in order))
+            self.app.handle_message(self.message('status'))
+            text = self.jobs()[-1]['text']
+            self.assertTrue(text.startswith('Wallets: 3\n'))
+            self.assertEqual(sorted(order, key=lambda wallet: text.index(f'<code>{wallet}</code>')), list(order))
+            self.assertIn(f'<code>{OTHER}</code>\nlive tag\nLast success: not yet; failures: 3', text)
+            self.assertIs(self.app.accounts[OTHER], original)
+
+    def test_wallet_commands_preserve_file_order_and_append_new_wallets(self):
+        third = '0x' + '1' * 40
+        self.app.accounts = {WALLET: Account(), OTHER: Account()}
+        self.config.wallets_file.write_text(f'{OTHER};\n{WALLET};\n')
+        for command, order in ((f'/settag {WALLET} whale', [OTHER, WALLET]),
+                               (f'/addwallet {third}', [OTHER, WALLET, third]),
+                               (f'/removewallet {OTHER}', [WALLET, third]),
+                               (f'/addwallet {OTHER}', [WALLET, third, OTHER])):
+            with self.subTest(command=command):
+                self.app.handle_message(self.message(command))
+                self.assertEqual(list(load_accounts(self.config.wallets_file)), order)
+                self.assertEqual(list(self.app.accounts), order)
+                self.app.handle_message(self.message('status'))
+                text = self.jobs()[-1]['text']
+                self.assertTrue(text.startswith(f'Wallets: {len(order)}\n'))
+                self.assertEqual(sorted(order, key=lambda wallet: text.index(f'<code>{wallet}</code>')), order)
+
+    def test_unreadable_wallet_order_keeps_status_available(self):
+        self.app.accounts = {WALLET: Account()}
+        with patch('walletwatcher.app.load_accounts', side_effect=PermissionError()), \
+                self.assertLogs('walletwatcher.app', level='WARNING'):
+            self.app.handle_message(self.message('status'))
+        self.assertTrue(self.jobs()[0]['text'].startswith('Wallets: 1\n'))
+        self.assertIn(f'<code>{WALLET}</code>', self.jobs()[0]['text'])
 
     def test_group_member_can_manage_wallets_in_authorized_chat(self):
         self.app.handle_message(self.message(f'/ADDWALLET@wallet_bot {WALLET.upper()}', user=999))

@@ -25,25 +25,24 @@ from walletwatcher.storage.wallets import load_accounts, normalize_wallet, save_
 logger = logging.getLogger(__name__)
 MOSCOW = timezone(timedelta(hours=3))
 HELP_TEXT = (
-    'Доступные команды:\n\n'
-    '/help — показать эту справку. Без аргументов.\n\n'
-    '/addwallet <address> — добавить кошелёк в мониторинг.\n\n'
-    '/removewallet <address> — удалить кошелёк из мониторинга.\n\n'
-    '/settag <address> <tag> — задать имя отслеживаемого кошелька. '
-    'Имя может содержать пробелы: до 100 символов, без точки с запятой и переносов строки.\n\n'
-    '/creds <address> <private_key> — сохранить или заменить адрес своего торгового '
-    'аккаунта и приватный ключ API wallet, привязав их к вашему Telegram ID. '
-    'Только в личном чате с ботом.\n\n'
-    '/my — показать баланс и открытые позиции своего аккаунта: маржу, цены, '
-    'P&L, funding и установленные TP/SL. Без аргументов; только в личном чате. '
-    'Сначала сохраните данные через /creds.\n\n'
-    '<address> — адрес кошелька вида 0x…; для /creds укажите адрес торгового '
-    'аккаунта, а не API wallet.\n'
-    '<private_key> — приватный ключ API/agent wallet, не основного кошелька.\n'
-    '<tag> — имя кошелька.\n'
-    'Аргументы в <…> обязательны: замените их своими значениями без скобок.\n\n'
-    'Любое другое сообщение показывает состояние мониторинга, список кошельков, '
-    'время последних успешных проверок, число ошибок и ожидающих уведомлений.'
+    'Available commands:\n\n'
+    '/addwallet <address> — add a wallet to monitoring.\n\n'
+    '/removewallet <address> — remove a wallet from monitoring.\n\n'
+    '/settag <address> <tag> — set a name for a tracked wallet. '
+    'Names may contain spaces: up to 100 characters, without semicolons or line breaks.\n\n'
+    '/creds <address> <private_key> — save or replace your trading account address '
+    'and API wallet private key, linked to your Telegram ID. '
+    'Only available in a private chat with the bot.\n\n'
+    '/my — show your account balance and open positions: margin, prices, '
+    'P&L, funding and configured TP/SL. No arguments; private chat only. '
+    'Save your credentials using /creds first.\n\n'
+    '<address> — a wallet address starting with 0x; for /creds, use the trading '
+    'account address, not the API wallet address.\n'
+    '<private_key> — the API/agent wallet private key, not your main wallet key.\n'
+    '<tag> — the wallet name.\n'
+    'Arguments in <…> are required: replace them with your values without the brackets.\n\n'
+    'Any other message shows monitoring status, tracked wallets, last successful '
+    'check times, failure counts and pending notifications.'
 )
 
 
@@ -188,12 +187,22 @@ class Application:
             heartbeat()
             self.process_personal_request(timeout=0.2)
 
+    def _accounts_in_file_order(self):
+        # Only refresh ordering; keep the monitored Account objects and their state.
+        try:
+            file_order = load_accounts(self.config.wallets_file)
+        except OSError as error:
+            logger.warning('Could not read wallet order (%s); using tracked order', type(error).__name__)
+            file_order = {}
+        ordered = dict.fromkeys((*file_order, *self.accounts))
+        return {wallet: self.accounts[wallet] for wallet in ordered if wallet in self.accounts}
+
     def _command(self, chat, text):
         args = text.split()
         command = args[0].split('@', 1)[0].lower() if args else ''
         if command == '/help':
             if len(args) != 1:
-                raise ValueError('Использование: /help')
+                raise ValueError('Usage: /help')
             self.reply(chat, HELP_TEXT)
             return
         if command in ('/addwallet', '/removewallet', '/settag'):
@@ -203,7 +212,7 @@ class Application:
             wallet = normalize_wallet(args[1])
             tag = validate_tag(' '.join(args[2:])) if command == '/settag' else None
             with self.lock:
-                proposed = self.accounts.copy()
+                proposed = self._accounts_in_file_order()
                 if command == '/addwallet':
                     if wallet in proposed:
                         self.reply(chat, f'Wallet {wallet} is already being tracked')
@@ -229,9 +238,11 @@ class Application:
             self.broadcast(response)
             return
         with self.lock:
+            accounts = self._accounts_in_file_order()
             updated = datetime.fromtimestamp(self.last_cycle, MOSCOW).strftime('%Y-%m-%d %H:%M:%S') if self.last_cycle else 'not yet'
-            lines = [f'Last monitoring cycle: {updated}', f'Pending notifications: {self.outbox.pending_count()}', '', 'Tracked wallets:']
-            for wallet, account in self.accounts.items():
+            lines = [f'Wallets: {len(accounts)}', f'Last monitoring cycle: {updated}',
+                     f'Pending notifications: {self.outbox.pending_count()}', '', 'Tracked wallets:']
+            for wallet, account in accounts.items():
                 last = datetime.fromtimestamp(account.last_updated, MOSCOW).strftime('%Y-%m-%d %H:%M:%S') if account.last_updated else 'not yet'
                 tag = f'\n{escape(account.tag)}' if account.tag else ''
                 lines.append(f'<code>{escape(wallet)}</code>{tag}\nLast success: {last}; failures: {account.failures}\n')

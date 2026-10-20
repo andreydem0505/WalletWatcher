@@ -421,12 +421,15 @@ class ApplicationTests(unittest.TestCase):
                       request['text'])
 
     def test_long_wallet_list_preserves_complete_copyable_addresses(self):
-        wallets = [f'0x{index:040x}' for index in range(50)]
+        wallets = [f'0x{index:040x}' for index in reversed(range(50))]
         self.app.accounts = {wallet: Account(tag='<>&' * 30) for wallet in wallets}
+        save_wallets(self.app.accounts, self.config.wallets_file)
         self.app.handle_message(self.message('status'))
         jobs = self.app.outbox.db.execute('SELECT text, html FROM outbox ORDER BY rowid').fetchall()
         self.assertGreater(len(jobs), 1)
         text = '\n'.join(job['text'] for job in jobs)
+        self.assertTrue(text.startswith('Wallets: 50\n'))
+        self.assertEqual(sorted(wallets, key=lambda wallet: text.index(f'<code>{wallet}</code>')), wallets)
         self.assertEqual(text.count('Last success: not yet; failures: 0\n\n<code>'), len(wallets) - 1)
         for wallet in wallets:
             self.assertEqual(text.count(f'<code>{wallet}</code>'), 1)

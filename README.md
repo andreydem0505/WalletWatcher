@@ -121,6 +121,13 @@ the container. `docker compose restart` does not reload the environment file.
 Missing or invalid credentials produce a clear configuration error (exit 78);
 stop the container, correct `.env`, then recreate it.
 
+If building fails at `COPY walletwatcher/ ./walletwatcher/` with
+`"/walletwatcher": not found`, verify that `walletwatcher/app.py` exists in the
+checkout and that `.dockerignore` is the current repository version. Old ignore
+files that allowed only root-level Python files exclude the package directory.
+Update both the source tree and `.dockerignore` before rebuilding. The checked-in
+rules include the package and test Python files, including nested directories.
+
 `docker compose down` removes containers and preserves wallet/outbox data.
 **`docker compose down -v` deletes that data permanently.** Do not run multiple
 containers or installations with the same Telegram token: polling returns 409
@@ -141,6 +148,10 @@ Commands:
 
 Changes to wallets and tags are written immediately using a temporary file,
 `fsync` and atomic replacement. The command does not confirm success before saving.
+Wallet lists start with `Wallets: <count>` and follow the order of tracked wallets
+in `wallets.txt`, including manual reordering while the bot is running. Wallet
+commands preserve that order; new wallets are appended at the end. If the file
+cannot be read, the list uses the current in-memory order.
 
 ### Personal account commands
 

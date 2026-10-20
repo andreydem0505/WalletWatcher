@@ -60,9 +60,10 @@ def on_change_message(wallet: str, account: Account) -> str:
     if trade is None:
         raise ValueError('Cannot render an account without a trade')
     volume = abs(number(trade.size) * number(trade.price))
+    tag = f'<code>{escape(account.tag)}</code>\n' if account.tag else ''
     header = (
         f'❗️ <b>{escape(trade.ticker)} {escape(trade.action)}</b> ❗️\n'
-        f'<code>{escape(account.tag or wallet)}</code>\n'
+        f'{tag}<code>{escape(wallet)}</code>\n'
         f'Volume: ${format_number(volume)}\nPrice: {escape(trade.price)}\n\n'
         '<b>Current positions with changes since this alert started:</b>\n'
     )
