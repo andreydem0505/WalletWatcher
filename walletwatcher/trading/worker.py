@@ -1,20 +1,29 @@
 """Single supervised worker serializes trading decisions, independently of monitoring."""
 import logging
+from hashlib import sha256
 import time
 from dataclasses import asdict
 from decimal import Decimal
+from typing import Callable
 
-from walletwatcher.hyperliquid.client import DataFetchError
-from walletwatcher.trading.api import Market, TradingAPI, TradingError, checkpoint, decimal, replay, triggered
+from walletwatcher.hyperliquid.errors import DataFetchError
+from walletwatcher.trading.api import TradingAPI
+from walletwatcher.trading.gateway import TradingGateway
+from walletwatcher.trading.policy import (
+    ACTIVATION_TIMEOUT, MAX_CLOSE_ATTEMPTS, MIN_RETRY_INTERVAL, ORDER_CONFIRMATION_GRACE_MS,
+    Market, TradingError, checkpoint, decimal, replay, triggered,
+)
 
 logger = logging.getLogger(__name__)
 
 
 class AutocloseWorker:
-    def __init__(self, app, store, api=None, clock=time.time):
+    def __init__(self, app, store, api: TradingGateway | None = None,
+                 clock: Callable[[], float] = time.time):
         self.app, self.store = app, store
         self.api = api or TradingAPI(app.client)
         self.clock = clock
+        self.closing_rules = set()
 
     def valid(self, rule):
         with self.app.lock:
@@ -26,6 +35,27 @@ class AutocloseWorker:
         self.store.finish(rule, state, f"Autoclose {rule['ticker']}: {reason}",
                           notify=rule['user'] in self.app.config.chat_ids, update_terminal=update_terminal,
                           attempt=attempt)
+        self.closing_rules.discard(rule['id'])
+        self.app.client.set_close_priority(rule['id'], False)
+
+    def set_close_priority(self, rule, enabled):
+        self.app.client.set_close_priority(rule['id'], enabled)
+        if enabled:
+            self.closing_rules.add(rule['id'])
+        else:
+            self.closing_rules.discard(rule['id'])
+        if rule.get('close_priority', False) != enabled:
+            rule['close_priority'] = enabled
+            self.store.save(rule)
+
+    def notify_attempt_issue(self, rule, attempt, kind, explanation):
+        """Journal the notice with the attempt so retries/restarts cannot spam it."""
+        if kind in attempt.get('notices', []) or rule['user'] not in self.app.config.chat_ids:
+            return
+        attempt.setdefault('notices', []).append(kind)
+        self.store.notify(rule, f"Autoclose {rule['ticker']}: attempt {attempt['number']}/{MAX_CLOSE_ATTEMPTS}: "
+                          + explanation,
+                          key=f"autoclose-attempt:{rule['id']}:{attempt['number']}:{kind}", attempt=attempt)
 
     def success(self, rule, update_terminal=False, attempt=None):
         amount = decimal(rule['filled'])
@@ -55,7 +85,7 @@ class AutocloseWorker:
             raise TradingError('Your trading account has no open position in this ticker.')
         rule['activation_stage'] = 'checking your position fill history'
         boundary = self.api.fills(credentials.address, stamp, stamp)
-        own_boundary = [f for f in boundary if f['coin'] == market.coin]
+        own_boundary = [f for f in boundary if f['coin'] == market.coin and int(f['time']) == stamp]
         if own_boundary:
             last = own_boundary[-1]
             after = decimal(last['startPosition']) + decimal(last['sz']) * (1 if last['side'] == 'B' else -1)
@@ -113,9 +143,17 @@ class AutocloseWorker:
             terminal = False  # HTTP response is not a substitute for reconciled fills.
         if not terminal:
             self.store.record(rule, attempt)
-            if self.clock() * 1000 > attempt['expires'] + 5000:
+            if self.clock() * 1000 > attempt['expires'] + ORDER_CONFIRMATION_GRACE_MS:
                 raise TradingError('Previous order outcome is unknown. No further order will be sent; check your account.')
+            self.notify_attempt_issue(rule, attempt, 'unverified',
+                'order execution is not yet verified by exchange status and fills. '
+                'No new order will be sent until this outcome is known.')
             return False
+        if persist and current != 0 and quantity < decimal(attempt['order']['s']):
+            kind = 'rejected' if quantity == 0 else 'partial'
+            self.notify_attempt_issue(rule, attempt, kind,
+                f"the IOC order filled {quantity} of {attempt['order']['s']}. Remaining position: {abs(current)}. "
+                'A retry requires a fresh position check and keeps the original 1% price limit.')
         rule['filled'] = str(decimal(rule['filled']) + quantity)
         rule['value'] = str(decimal(rule['value']) + value)
         attempt.update(resolved=True, filled=str(quantity), value=str(value))
@@ -138,22 +176,25 @@ class AutocloseWorker:
                                        'No new order will be sent; check your account.')
                 return  # One unresolved order per trading account and instrument.
         if rule['state'] == 'queued':
-            if 'activation_deadline' not in rule:
-                rule['activation_deadline'] = self.clock() + 300
-                self.store.save(rule)
-            if self.clock() >= rule['activation_deadline']:
-                self.finish(rule, 'failed', rule.get('activation_error', 'Activation did not complete.') +
-                            ' Activation timed out; no rule was armed. Please retry /autoclose.')
-                return
-            if self.clock() < rule.get('activation_retry_at', 0):
-                return
-            self.arm(rule)
+            self.activate(rule)
             return
         market = Market(**rule['market'])
+        rule['check_stage'] = 'reading your trading account position'
         current, stamp = self.api.position(rule['address'], market)
-        fills = self.api.fills(rule['address'], rule['checkpoint'], stamp)
+        source_triggered = rule['state'] == 'closing'
+        if rule['state'] == 'armed' and current * decimal(rule['original_size']) > 0:
+            rule['check_stage'] = 'reading the tracked wallet position'
+            source, _ = self.api.position(rule['wallet'], market)
+            source_triggered = triggered(rule['source_size'], source)
+        # Protect every remaining validation, quote, send and reconciliation
+        # request as soon as the source trigger is observed, even before POST.
+        self.set_close_priority(rule, source_triggered)
+        rule['check_stage'] = 'checking your position fill history'
+        fills = self.api.fills(rule['address'], rule['checkpoint'], stamp,
+                               anchor=rule.get('history_anchor'))
         ended = replay(rule, current, stamp, fills)
         if 'pending' in rule:
+            rule['check_stage'] = 'reconciling the previous order'
             if not self.reconcile(rule, current, fills):
                 return
             if current == 0:
@@ -171,27 +212,47 @@ class AutocloseWorker:
             return
         checkpoint(rule, current, stamp, fills)
         self.store.save(rule)
-        if rule['attempts'] >= 3:
+        if rule['attempts'] >= MAX_CLOSE_ATTEMPTS:
             self.finish(rule, 'failed', f"3 market-close attempts completed. Remaining position: {abs(current)}. "
                         'The price limit was not widened.')
             return
-        source, _ = self.api.position(rule['wallet'], market)
-        if rule['state'] == 'armed' and not triggered(rule['source_size'], source):
+        if not source_triggered:
             return
-        if self.clock() < rule.get('last_send', 0) + 2:
+        if self.clock() < max(rule.get('last_send', 0) + MIN_RETRY_INTERVAL, rule.get('next_attempt_at', 0)):
             return
+        self.submit_close(rule, market, current)
+
+    def activate(self, rule):
+        if 'activation_deadline' not in rule:
+            rule['activation_deadline'] = self.clock() + ACTIVATION_TIMEOUT
+            self.store.save(rule)
+        if self.clock() >= rule['activation_deadline']:
+            self.finish(rule, 'failed', rule.get('activation_error', 'Activation did not complete.') +
+                        ' Activation timed out; no rule was armed. Please retry /autoclose.')
+            return
+        if self.clock() < rule.get('activation_retry_at', 0):
+            return
+        self.arm(rule)
+
+    def submit_close(self, rule, market, current):
+        """Revalidate the position and commit the journal before the HTTP send."""
         credentials = self.app.credentials.load(rule['user'])
         if credentials is None:
             raise TradingError('Credentials are missing.')
+        rule['check_stage'] = 'checking trading permissions'
         signer, vault = self.api.authority(credentials)
         if signer != rule['signer'] or vault != rule['vault']:
             raise TradingError('Trading authority changed. Rule cancelled.')
         if 'price' not in rule:
+            rule['check_stage'] = 'reading the market quote'
             rule['price'] = market.price(self.api.mid(market), current < 0)
         # Refresh immediately before submitting, replaying any fills since the
         # cycle snapshot. External manual trading cannot be atomic with our POST.
+        rule['check_stage'] = 'refreshing your position before submission'
         latest, stamp = self.api.position(rule['address'], market, fresh=True)
-        fills = self.api.fills(rule['address'], rule['checkpoint'], stamp)
+        rule['check_stage'] = 'verifying fills before submission'
+        fills = self.api.fills(rule['address'], rule['checkpoint'], stamp, fresh=True,
+                               anchor=rule.get('history_anchor'))
         if replay(rule, latest, stamp, fills) or latest * current <= 0:
             self.finish(rule, 'cancelled', 'your original position closed or reversed before order submission.')
             return
@@ -202,10 +263,19 @@ class AutocloseWorker:
         if attempt is None:
             return
         try:
+            rule['check_stage'] = 'submitting the reduce-only order'
             result = self.api.send(credentials, vault, attempt)
-        except DataFetchError:
-            # Durable pending attempt is reconciled next cycle, never resubmitted.
-            return
+        except DataFetchError as error:
+            if error.submitted is False:
+                # The local limiter rejected the request before any HTTP send.
+                # This outcome is known; it must not fence the account forever
+                # behind an order ID that the exchange has never received.
+                attempt.update(resolved=True, not_submitted=True)
+                rule.pop('pending')
+                rule['next_attempt_at'] = self.clock() + max(MIN_RETRY_INTERVAL, error.retry_after)
+                self.store.record(rule, attempt)
+            # Actual transport failures remain pending and are reconciled first.
+            raise
         finally:
             self.api.begin_cycle()  # Other rules must observe post-order positions.
         if result.get('status') != 'ok':
@@ -214,27 +284,60 @@ class AutocloseWorker:
             self.store.record(rule, attempt)
             raise TradingError('Exchange rejected the order; check API wallet permissions and account limits. '
                                'No further orders will be sent.')
-        else:
-            statuses = result['response']['data']['statuses']
-            if len(statuses) != 1:
-                raise TradingError('Unexpected order response. Check your account before arming a new rule.')
-            status = statuses[0]
-            if 'filled' in status:
-                attempt['response'] = status['filled']
-                attempt['oid'] = status['filled']['oid']
-            elif 'error' in status:
-                attempt['rejected'] = True
-                # Do not relay untrusted exchange strings or credentials.
-                attempt['error'] = 'IOC order was rejected or could not match within the price limit.'
+        statuses = result['response']['data']['statuses']
+        if len(statuses) != 1:
+            raise TradingError('Unexpected order response. Check your account before arming a new rule.')
+        status = statuses[0]
+        if 'filled' in status:
+            attempt['response'] = status['filled']
+            attempt['oid'] = status['filled']['oid']
+        elif 'error' in status:
+            attempt['rejected'] = True
+            # Do not relay untrusted exchange strings or credentials.
+            attempt['error'] = 'IOC order was rejected or could not match within the price limit.'
         self.store.record(rule, attempt)
+        if attempt.get('rejected'):
+            self.notify_attempt_issue(rule, attempt, 'rejected', attempt['error'] +
+                ' The position is not confirmed closed. A retry requires a fresh position check; '
+                'at most 3 attempts will be sent with the original 1% price limit.')
+        elif 'response' in attempt and decimal(attempt['response']['totalSz']) < decimal(attempt['order']['s']):
+            self.notify_attempt_issue(rule, attempt, 'partial',
+                f"the exchange reports a partial fill: {attempt['response']['totalSz']} of {attempt['order']['s']}. "
+                'Execution and the remaining position must be verified before retrying.')
+        elif 'response' not in attempt:
+            self.notify_attempt_issue(rule, attempt, 'unverified',
+                'the exchange did not report a completed IOC execution. '
+                'No new order will be sent until order status and fills establish the outcome.')
 
     def cycle(self):
+        self.app.client.set_trading_priority(True)
+        active = self.store.active()
+        self.closing_rules = {rule['id'] for rule in active
+                              if (rule['state'] == 'closing' or rule.get('close_priority'))
+                              and ('pending' in rule or not self.store.cancelled(rule))}
+        self.app.client.sync_close_priorities(self.closing_rules)
+        self.app.client.reserve_for_trading(bool(active))
         self.api.begin_cycle()
+        if not self.closing_rules:
+            self.reconcile_terminal_rules()
+        for rule in sorted(self.store.active(), key=lambda item: item['id'] not in self.closing_rules):
+            if self.app.stop.is_set():
+                break
+            if self.closing_rules and rule['id'] not in self.closing_rules:
+                continue  # New registrations and idle checks yield to closing.
+            self.process_rule(rule)
+        self.app.client.reserve_for_trading(bool(self.store.active()))
+        self.app.client.finish_trading_cycle(
+            {rule['id'] for rule in self.store.active()}
+            | {rule['id'] for rule, _ in self.store.unresolved()})
+
+    def reconcile_terminal_rules(self):
         # A failed rule can still have an in-flight request. Keep its account
         # fenced until a definitive status is observed, including after restart.
         for rule, active in self.store.unresolved():
             if active or self.app.stop.is_set():
                 continue
+            self.app.client.set_trading_rule(rule['id'])
             try:
                 status = self.api.status(rule['address'], rule['pending']['cloid'])
                 if not self.terminal_status(rule, status):
@@ -242,7 +345,8 @@ class AutocloseWorker:
                 attempt = rule['pending']
                 try:
                     current, stamp = self.api.position(rule['address'], Market(**rule['market']), fresh=True)
-                    fills = self.api.fills(rule['address'], rule['checkpoint'], stamp)
+                    fills = self.api.fills(rule['address'], rule['checkpoint'], stamp,
+                                           anchor=rule.get('history_anchor'))
                     if self.reconcile(rule, current, fills, status, persist=False):
                         if current == 0 and decimal(rule['filled']) > 0:
                             self.success(rule, update_terminal=True, attempt=attempt)
@@ -255,26 +359,75 @@ class AutocloseWorker:
                     attempt['resolved'] = True  # The verified order is terminal.
                     self.finish(rule, 'failed', 'previous order is terminal, but execution details '
                                 'could not be verified. Check your account.', update_terminal=True, attempt=attempt)
-            except Exception:
-                # No trading or repeated notifications during late reconciliation.
-                continue
-        for rule in self.store.active():
-            if self.app.stop.is_set():
-                break
-            try:
-                self.step(rule)
-            except DataFetchError as error:
-                if rule['state'] == 'queued':
-                    self.activation_failed(rule, error)
-                elif 'pending' in rule and self.clock() * 1000 > rule['pending']['expires'] + 5000:
-                    self.finish(rule, 'failed', 'order outcome could not be verified. No further orders will be sent; check your account.')
-                # Read-only API/rate failures defer the check without fabricating a close.
-            except TradingError as error:
-                self.finish(rule, 'failed', str(error))
             except Exception as error:
-                logger.error('Autoclose rule %s failed (%s)', rule['id'], type(error).__name__)
-                self.finish(rule, 'failed', 'account data or credentials could not be verified. '
-                            'No further orders will be sent; check your account.')
+                # Never retry orders during late reconciliation, but explain
+                # failures instead of silently swallowing them.
+                detail = error.diagnostic() if isinstance(error, DataFetchError) else 'exchange data could not be verified'
+                # A failed transaction may have already mutated the in-memory
+                # rule. Reload the committed journal before recording a notice.
+                saved = next((item for item, _ in self.store.unresolved() if item['id'] == rule['id']), None)
+                if saved is not None:
+                    try:
+                        kind = 'late-reconciliation-' + sha256(detail.encode()).hexdigest()[:12]
+                        self.notify_attempt_issue(saved, saved['pending'], kind,
+                            f'late order reconciliation failed: {detail}. No further orders will be sent; check your account.')
+                    except Exception as notice_error:
+                        logger.error('Autoclose notice could not be persisted (%s); reconciliation will retry',
+                                     type(notice_error).__name__)
+                continue
+
+    def process_rule(self, rule):
+        self.app.client.set_trading_rule(rule['id'])
+        try:
+            self.step(rule)
+        except DataFetchError as error:
+            if rule['state'] == 'queued':
+                self.activation_failed(rule, error)
+            elif not error.retryable and 'pending' not in rule:
+                self.finish(rule, 'failed',
+                    f"closing failed while {rule.get('check_stage', 'checking exchange data')}: "
+                    f'{error.diagnostic()}. This error is not retryable; no further orders will be sent.')
+            elif 'pending' in rule and self.clock() * 1000 > rule['pending']['expires'] + ORDER_CONFIRMATION_GRACE_MS:
+                self.finish(rule, 'failed', f"order outcome could not be verified while {rule.get('check_stage', 'checking exchange data')}: "
+                            f'{error.diagnostic()}. No further orders will be sent; check your account.')
+            else:
+                self.check_failed(rule, error)
+        except TradingError as error:
+            self.finish(rule, 'failed', str(error))
+        except Exception as error:
+            logger.error('Autoclose rule %s failed (%s)', rule['id'], type(error).__name__)
+            self.finish(rule, 'failed', f"closing failed while {rule.get('check_stage', 'checking account data')}: "
+                        'account data or credentials could not be verified. '
+                        'No further orders will be sent; check your account.')
+        else:
+            if rule['state'] != 'queued' and 'check_error_since' in rule:
+                rule.pop('check_error_since')
+                rule.pop('check_delay_notified', None)
+                rule['last_check_recovered_at'] = self.clock()
+                self.store.save(rule)
+                logger.info('Autoclose rule %s: checks resumed', rule['id'])
+
+    def check_failed(self, rule, error):
+        now = self.clock()
+        stage = rule.get('check_stage', 'checking account data')
+        detail = error.diagnostic()
+        previous = rule.get('last_check_error', {})
+        changed = (previous.get('stage'), previous.get('detail')) != (stage, detail)
+        if changed or now >= rule.get('check_error_logged_at', 0) + 60:
+            logger.warning('Autoclose rule %s delayed while %s: %s', rule['id'], stage, detail)
+            rule['check_error_logged_at'] = now
+        rule['last_check_error'] = dict(at=now, stage=stage, detail=detail)
+        rule.setdefault('check_error_since', now)
+        if (changed or not rule.get('check_delay_notified')) and rule['user'] in self.app.config.chat_ids:
+            rule['check_delay_notified'] = True
+            rule['check_error_serial'] = rule.get('check_error_serial', 0) + 1
+            outcome = ('The submitted order outcome is unknown; no new order will be sent until it is verified.'
+                       if 'pending' in rule else 'Automatic retries continue. Position closure is not confirmed.')
+            self.store.notify(rule, f"Autoclose {rule['ticker']}: checks are delayed while {stage}: {detail}. "
+                              + outcome,
+                              key=f"autoclose-delay:{rule['id']}:{rule['check_error_serial']}")
+        else:
+            self.store.save(rule)
 
     def activation_failed(self, rule, error):
         stage = rule.get('activation_stage', 'loading account data')
@@ -286,14 +439,15 @@ class AutocloseWorker:
         if not error.retryable or failures >= 3:
             self.finish(rule, 'failed', reason + ' No rule was armed. Please retry /autoclose later.')
             return
-        deadline = rule.setdefault('activation_deadline', self.clock() + 300)
+        deadline = rule.setdefault('activation_deadline', self.clock() + ACTIVATION_TIMEOUT)
         delay = max(self.app.config.poll_interval * 2 ** (failures - 1), error.retry_after)
         rule['activation_retry_at'] = min(deadline, self.clock() + delay)
-        self.store.save(rule)
-        if failures == 1 and rule['user'] in self.app.config.chat_ids:
-            self.app.outbox.enqueue(rule['user'],
+        if rule['user'] in self.app.config.chat_ids:
+            self.store.notify(rule,
                 f"Autoclose {rule['ticker']}: {reason} Retrying automatically; the rule is not armed yet.",
-                key='autoclose-activation:' + rule['id'])
+                key=f"autoclose-activation:{rule['id']}:{failures}")
+        else:
+            self.store.save(rule)
 
     def run(self, heartbeat):
         self.app.client.set_heartbeat(heartbeat)
@@ -302,5 +456,19 @@ class AutocloseWorker:
                 heartbeat()
                 self.cycle()
                 self.app.stop.wait(self.app.config.poll_interval)
+        except Exception:
+            try:
+                for rule in self.store.active():
+                    if rule['id'] in self.closing_rules:
+                        self.check_failed(rule, DataFetchError('Autoclose worker interrupted', reason='worker_failure'))
+            except Exception as notice_error:
+                logger.error('Autoclose interruption notice could not be persisted (%s)', type(notice_error).__name__)
+            raise
         finally:
+            # A supervised restart must not let monitoring spend the budget
+            # while a known close is still pending. The new cycle restores it
+            # from SQLite; only application shutdown releases it unconditionally.
+            if self.app.stop.is_set():
+                self.app.client.reserve_for_trading(False)
+            self.app.client.set_trading_priority(False)
             self.api.close()

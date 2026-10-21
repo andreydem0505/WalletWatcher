@@ -13,13 +13,21 @@ walletwatcher/
   app.py             Telegram commands and application workers
   config.py          Environment configuration and project paths
   domain/            Position models and time helpers
-  hyperliquid/       HTTP client and on-demand WebSocket snapshots
+  hyperliquid/       HTTP facade, shared request budget and on-demand portfolio reads
   storage/           Wallet files, encrypted credentials and delivery queue
-  trading/           Persistent one-shot autoclose rules and signed IOC execution
-  presentation/      Parsing and formatting of alerts and personal portfolios
+  trading/           Pure trading policy, exchange gateway and autoclose execution
+  presentation/      Command responses, alerts and personal portfolio formatting
   infrastructure/    Logging, watchdogs, process supervisor and health check
 tests/               Offline regression tests and an opt-in live API check
 ```
+
+`hyperliquid/client.py` keeps the shared API facade. `rate_limit.py` owns rolling
+request accounting and dynamic trading priority; `snapshots.py` owns WebSocket
+connection limits; `portfolio.py` owns the temporary sessions used by `/my`.
+`trading/policy.py` contains Decimal calculations and position lifecycle checks
+without HTTP or SDK dependencies. `TradingGateway` describes the exchange
+operations used by the autoclose worker, and `TradingAPI` implements them using
+the managed client. Persistent rule/attempt formats are unchanged.
 
 Docker copies the `walletwatcher` package into `/app` and starts
 `python -m walletwatcher.infrastructure.supervisor`; the supervisor starts the
@@ -246,13 +254,39 @@ checks does not trigger. Checks run in a separate supervised worker, with
 The worker has its own HTTP session and shares the application's IP rate budget.
 Wallet/DEX snapshots are shared between rules within a cycle; a fresh user
 snapshot is mandatory immediately before each order.
+While rules are waiting for their source trigger, monitoring and `/my` can use
+all unused capacity in the shared 1000-unit rolling-minute request-weight budget.
+If a trading request cannot fit, its required weight is dynamically protected
+from ordinary requests until it is admitted or no longer needed. Other free
+capacity remains available to monitoring. Smaller trading requests do not clear
+a larger pending request's priority. No fixed 600-unit reserve is held.
+Already spent weight cannot be reclaimed: trading may still wait for earlier
+requests to leave the rolling window. The total never exceeds 1000. Local budget
+refusal delays only the request that does not fit; a genuine HTTP 429 still
+blocks every worker for `Retry-After`.
+
+As soon as a source trigger is observed, closing becomes exclusive: ordinary
+REST requests (monitoring and `/my`) and idle/queued autoclose checks pause.
+Validation, signing, submission, retries and confirmation of the closing rule
+take priority. Monitor pauses do not count as wallet failures or increase its
+backoff. Priority survives restarts and ends on confirmed completion,
+cancellation without an in-flight order, source recovery before submission,
+or final failure. Terminal unresolved orders remain fenced against new trading
+without indefinitely pausing unrelated monitoring. Already admitted HTTP requests
+cannot be recalled, and already spent API weight must still expire normally.
 
 The rule follows your original position. Its fill history is checked even when
 the net position size is unchanged. Manual closure, reversal, TP/SL or liquidation
 ends that lifecycle; a reopened position does not inherit the rule. Incomplete,
 truncated or inconsistent history stops the rule without placing a new order.
-The history guard conservatively stops if 2000 recent fills no longer reach the
-saved checkpoint. The exchange cannot atomically bind an order to one opening:
+An initial or legacy rule reads recent fills to establish a saved fill anchor;
+bootstrap conservatively stops if 2000 recent fills do not reach the checkpoint.
+Subsequent polls request only fills from that anchor onward and require the
+saved fill to remain present, detecting retention gaps even if a close/reopen
+left position size unchanged. Identical history snapshots are shared within a
+cycle; validation immediately before submitting always bypasses that cache.
+Source positions, own positions and lifecycle history are still checked each
+poll. The exchange cannot atomically bind an order to one opening:
 manual close/reopen racing with final validation and order submission remains an
 API limitation. Avoid simultaneous manual trading during execution.
 
@@ -272,6 +306,19 @@ check the account. A successful HTTP response alone is insufficient: actual fill
 and a zero position remainder must be confirmed. The final private notification
 includes quantity, average execution price, account and source. Rule completion
 and its notification commit together; the durable delivery queue handles retries.
+Active-rule request failures are saved with their stage and safe diagnostics.
+Failures are immediately queued for the owner with a safe explanation of the
+failed stage and whether closure is confirmed, retrying or stopped. Identical
+continuing failures are deduplicated, including after restart; a new cause or
+new outage is reported again. Each failed activation attempt, rejected IOC,
+reported partial fill and unverified order outcome is also explained. Late
+reconciliation failures are reported while retaining the order fence. Fatal
+non-retryable errors before submission stop the rule and release monitoring.
+Telegram outages or flood waits can delay actual delivery; the durable outbox
+retries it. A local refusal before HTTP submission is
+journaled as not submitted and retried after budget recovery, without creating
+an unknown-order block. It still consumes one of the three close attempts.
+Actual transport failures remain uncertain and must be reconciled before retry.
 An unresolved order also blocks other rules for that account and ticker. Late
 read-only reconciliation continues after failure; a definitive exchange status
 releases this block, and a subsequently confirmed full close updates the final

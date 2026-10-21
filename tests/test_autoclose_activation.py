@@ -78,7 +78,7 @@ class ActivationRetryTests(ApplicationFixture):
                 self.clock.advance(delay)
                 self.worker.cycle()
         self.assertFalse(self.store.active())
-        self.assertEqual(len(self.jobs()), 2)  # One delay notice and one final error.
+        self.assertEqual(len(self.jobs()), 3)  # Every failed activation attempt is explained.
         self.assertIn('No rule was armed', self.jobs()[-1]['text'])
         self.assertFalse(self.exchange.orders)
 

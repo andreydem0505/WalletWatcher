@@ -1,6 +1,4 @@
 """Application entry point; all outbound Telegram traffic uses DeliveryQueue."""
-from datetime import datetime, timezone, timedelta
-from html import escape
 import copy
 import logging
 import os
@@ -15,44 +13,19 @@ from telebot import apihelper
 from walletwatcher.config import Config, ConfigError
 from walletwatcher.storage.credentials import CredentialsStore
 from walletwatcher.storage.autoclose import AutocloseStore
-from walletwatcher.trading.api import ticker_name
+from walletwatcher.trading.policy import ticker_name
 from walletwatcher.trading.worker import AutocloseWorker
-from walletwatcher.hyperliquid.client import DataFetchError, HyperliquidClient
+from walletwatcher.hyperliquid.client import HyperliquidClient
+from walletwatcher.hyperliquid.errors import DataFetchError
 from walletwatcher.storage.delivery import DeliveryQueue
 from walletwatcher.presentation.formatting import on_change_message
 from walletwatcher.domain.models import Account, TradeAction
 from walletwatcher.presentation.portfolio import portfolio_messages
+from walletwatcher.presentation.commands import HELP_TEXT, autoclose_messages, monitoring_messages
 from walletwatcher.infrastructure.runtime import InstanceLock, WorkerSupervisor, configure_logging, in_docker, redact_secrets
 from walletwatcher.storage.wallets import load_accounts, normalize_wallet, save_wallets, validate_tag
 
 logger = logging.getLogger(__name__)
-MOSCOW = timezone(timedelta(hours=3))
-HELP_TEXT = (
-    'Available commands:\n\n'
-    '/addwallet <address> — add a wallet to monitoring.\n\n'
-    '/removewallet <address> — remove a wallet from monitoring.\n\n'
-    '/settag <address> <tag> — set a name for a tracked wallet. '
-    'Names may contain spaces: up to 100 characters, without semicolons or line breaks.\n\n'
-    '/creds <address> <private_key> — save or replace your trading account address '
-    'and API wallet private key, linked to your Telegram ID. '
-    'Only available in a private chat with the bot.\n\n'
-    '/my — show your account balance and open positions: margin, prices, '
-    'P&L, funding and configured TP/SL. No arguments; private chat only. '
-    'Save your credentials using /creds first.\n\n'
-    '/autoclose <wallet> <ticker> — once the tracked wallet has less than 10% of its '
-    'initial position remaining, market-close your position in this ticker. '
-    'Private chat only; /creds required. One-shot, 1% price limit, up to 3 attempts.\n\n'
-    '/cancelautoclose <wallet> <ticker> — cancel your rule. Already submitted orders '
-    'may still execute. Use full HIP-3 tickers such as xyz:EWZ.\n\n'
-    '/autocloses — your active rules; private chat only.\n\n'
-    '<address> — a wallet address starting with 0x; for /creds, use the trading '
-    'account address, not the API wallet address.\n'
-    '<private_key> — the API/agent wallet private key, not your main wallet key.\n'
-    '<tag> — the wallet name.\n'
-    'Arguments in <…> are required: replace them with your values without the brackets.\n\n'
-    'Any other message shows monitoring status, tracked wallets, last successful '
-    'check times, failure counts and pending notifications.'
-)
 
 
 class Application:
@@ -70,11 +43,12 @@ class Application:
         self.personal_lock = threading.Lock()
         self.accounts = load_accounts(config.wallets_file)
         self.last_cycle = None
-        self.outbox.bind_bot(config.token.split(':', 1)[0])
+        bot_id = config.token.split(':', 1)[0]
+        self.outbox.bind_bot(bot_id)
         self.credentials = CredentialsStore(
-            self.outbox.db, self.outbox.lock, config.token.split(':', 1)[0],
+            self.outbox.db, self.outbox.lock, bot_id,
             config.database_file.with_name('credentials.key'))
-        self.autoclose_store = AutocloseStore(self.outbox, config.token.split(':', 1)[0])
+        self.autoclose_store = AutocloseStore(self.outbox, bot_id)
         self.autoclose = AutocloseWorker(self, self.autoclose_store)
         self.offset = int(self.outbox.get_metadata('telegram_offset', 0))
         self.outbox.prune(self.accounts, config.recipients, config.chat_ids)
@@ -128,11 +102,18 @@ class Application:
             logger.warning('Could not delete credentials message (%s)', type(error).__name__)
             return False
 
-    def autoclose_command(self, message, command, args):
+    @staticmethod
+    def _private_user_id(message):
         user = getattr(getattr(message, 'from_user', None), 'id', None)
+        if (getattr(message.chat, 'type', None) == 'private'
+                and type(user) is int and user > 0 and user == message.chat.id):
+            return user
+        return None
+
+    def autoclose_command(self, message, command, args):
+        user = self._private_user_id(message)
         chat = message.chat.id
-        if (getattr(message.chat, 'type', None) != 'private' or type(user) is not int
-                or user <= 0 or user != chat):
+        if user is None:
             self.reply(chat, 'Autoclose commands are available only in your private chat with the bot.')
             return
         try:
@@ -169,21 +150,14 @@ class Application:
         if not rules:
             self.reply(user, 'You have no active autoclose rules.')
             return
-        text = ''
-        for rule in rules:
-            line = f"<code>{escape(rule['wallet'])}</code> {escape(rule['ticker'])}"
-            if text and len(text) + len(line) + 1 > 1500:
-                self.outbox.enqueue(user, text, html=True)
-                text = ''
-            text += ('\n' if text else '') + line
-        self.outbox.enqueue(user, text, html=True)
+        for text in autoclose_messages(rules):
+            self.outbox.enqueue(user, text, html=True)
 
     def personal_command(self, message, command, args):
         chat = message.chat.id
         deleted = self.delete_credentials_message(message) if command == '/creds' else False
-        user_id = getattr(getattr(message, 'from_user', None), 'id', None)
-        if (getattr(message.chat, 'type', None) != 'private' or type(user_id) is not int
-                or user_id <= 0 or chat != user_id):
+        user_id = self._private_user_id(message)
+        if user_id is None:
             self.reply(chat, 'Команды /creds и /my доступны только в личном чате с ботом.')
             return
         try:
@@ -271,57 +245,49 @@ class Application:
             self.reply(chat, HELP_TEXT)
             return
         if command in ('/addwallet', '/removewallet', '/settag'):
-            expected = 3 if command == '/settag' else 2
-            if len(args) < expected or (expected == 2 and len(args) != 2):
-                raise ValueError(f'Usage: {command} <wallet>' + (' <tag>' if expected == 3 else ''))
-            wallet = normalize_wallet(args[1])
-            tag = validate_tag(' '.join(args[2:])) if command == '/settag' else None
-            with self.lock:
-                proposed = self._accounts_in_file_order()
-                if command == '/addwallet':
-                    if wallet in proposed:
-                        self.reply(chat, f'Wallet {wallet} is already being tracked')
-                        return
-                    proposed[wallet] = Account()
-                    response = f'Wallet {wallet} added'
-                else:
-                    if wallet not in proposed:
-                        self.reply(chat, f'Wallet {wallet} is not being tracked')
-                        return
-                    if command == '/removewallet':
-                        del proposed[wallet]
-                        response = f'Wallet {wallet} removed'
-                    else:
-                        # Validate/save without changing live state on write failure.
-                        proposed[wallet] = copy.copy(proposed[wallet])
-                        proposed[wallet].tag = tag
-                        response = f'Wallet {wallet} tag set to {tag}'
-                save_wallets(proposed, self.config.wallets_file)
-                self.accounts = proposed
-                if command == '/removewallet':
-                    self.outbox.forget_wallet(wallet)
-                    self.autoclose_store.cancel_source(wallet)
-            self.broadcast(response)
+            self._wallet_command(chat, command, args)
             return
+        self._send_status(chat)
+
+    def _wallet_command(self, chat, command, args):
+        expected = 3 if command == '/settag' else 2
+        if len(args) < expected or (expected == 2 and len(args) != 2):
+            raise ValueError(f'Usage: {command} <wallet>' + (' <tag>' if expected == 3 else ''))
+        wallet = normalize_wallet(args[1])
+        tag = validate_tag(' '.join(args[2:])) if command == '/settag' else None
+        with self.lock:
+            proposed = self._accounts_in_file_order()
+            if command == '/addwallet':
+                if wallet in proposed:
+                    self.reply(chat, f'Wallet {wallet} is already being tracked')
+                    return
+                proposed[wallet] = Account()
+                response = f'Wallet {wallet} added'
+            else:
+                if wallet not in proposed:
+                    self.reply(chat, f'Wallet {wallet} is not being tracked')
+                    return
+                if command == '/removewallet':
+                    del proposed[wallet]
+                    response = f'Wallet {wallet} removed'
+                else:
+                    # Validate/save without changing live state on write failure.
+                    proposed[wallet] = copy.copy(proposed[wallet])
+                    proposed[wallet].tag = tag
+                    response = f'Wallet {wallet} tag set to {tag}'
+            save_wallets(proposed, self.config.wallets_file)
+            self.accounts = proposed
+            if command == '/removewallet':
+                self.outbox.forget_wallet(wallet)
+                self.autoclose_store.cancel_source(wallet)
+        self.broadcast(response)
+
+    def _send_status(self, chat):
         with self.lock:
             accounts = self._accounts_in_file_order()
-            updated = datetime.fromtimestamp(self.last_cycle, MOSCOW).strftime('%Y-%m-%d %H:%M:%S') if self.last_cycle else 'not yet'
-            lines = [f'Wallets: {len(accounts)}', f'Last monitoring cycle: {updated}',
-                     f'Pending notifications: {self.outbox.pending_count()}', '', 'Tracked wallets:']
-            for wallet, account in accounts.items():
-                last = datetime.fromtimestamp(account.last_updated, MOSCOW).strftime('%Y-%m-%d %H:%M:%S') if account.last_updated else 'not yet'
-                tag = f'\n{escape(account.tag)}' if account.tag else ''
-                lines.append(f'<code>{escape(wallet)}</code>{tag}\nLast success: {last}; failures: {account.failures}\n')
-        # Keep each wallet and its HTML tags intact when splitting long lists.
-        message = ''
-        for line in lines:
-            candidate = message + ('\n' if message else '') + line
-            if len(candidate) > 1500:
-                self.outbox.enqueue(chat, message, html=True)
-                message = line
-            else:
-                message = candidate
-        self.outbox.enqueue(chat, message, html=True)
+            messages = monitoring_messages(accounts, self.last_cycle, self.outbox.pending_count())
+        for message in messages:
+            self.outbox.enqueue(chat, message, html=True)
 
     def poll_wallet(self, wallet, account):
         positions = self.client.fetch_open_positions(wallet)
@@ -370,6 +336,8 @@ class Application:
                 try:
                     self.poll_wallet(wallet, account)
                 except Exception as error:
+                    if isinstance(error, DataFetchError) and error.reason == 'trading_priority':
+                        break  # A deliberate pause must not increase wallet failure backoff.
                     with self.lock:
                         account.failures = min(account.failures + 1, 10)
                         account.next_poll = time.monotonic() + min(300, 2 ** account.failures)

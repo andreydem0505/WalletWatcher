@@ -50,9 +50,13 @@ class AutocloseStore:
 
     def unresolved(self):
         with self.lock:
-            return [(json.loads(row[0]), bool(row[1])) for row in self.db.execute(
-                'SELECT data,active FROM autoclose_rules WHERE bot_id=?', (self.bot_id,))
-                if 'pending' in json.loads(row[0])]
+            result = []
+            rows = self.db.execute('SELECT data,active FROM autoclose_rules WHERE bot_id=?', (self.bot_id,))
+            for raw, active in rows:
+                rule = json.loads(raw)
+                if 'pending' in rule:
+                    result.append((rule, bool(active)))
+            return result
 
     def save(self, rule):
         with self.lock, self.db:
@@ -92,10 +96,13 @@ class AutocloseStore:
             if changed and notify:
                 self.outbox.enqueue_transaction(rule['user'], text, key='autoclose:' + rule['id'])
 
-    def notify(self, rule, text):
+    def notify(self, rule, text, *, key=None, attempt=None):
         with self.lock, self.db:
+            if attempt is not None:
+                self.db.execute('UPDATE autoclose_attempts SET data=? WHERE rule_id=? AND number=?',
+                                (json.dumps(attempt), rule['id'], attempt['number']))
             self.db.execute('UPDATE autoclose_rules SET data=? WHERE id=?', (json.dumps(rule), rule['id']))
-            self.outbox.enqueue_transaction(rule['user'], text, key='autoclose-armed:' + rule['id'])
+            self.outbox.enqueue_transaction(rule['user'], text, key=key or 'autoclose-armed:' + rule['id'])
 
     def prepare(self, rule, signer, order, now):
         """The send boundary is committed before the HTTP request; never replay it."""

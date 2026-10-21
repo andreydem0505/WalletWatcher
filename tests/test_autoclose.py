@@ -50,7 +50,7 @@ class Exchange:
     def position(self, address, market, fresh=False):
         return (self.source if address == WALLET else self.own), int(self.clock() * 1000)
 
-    def fills(self, address, start, end):
+    def fills(self, address, start, end, fresh=False, anchor=None):
         return [f for f in self.history if start <= f['time'] <= end]
 
     def mid(self, market):

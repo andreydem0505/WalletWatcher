@@ -1,0 +1,29 @@
+"""The exchange capabilities required by autoclose, independent of an SDK."""
+from decimal import Decimal
+from typing import Protocol
+
+from walletwatcher.storage.credentials import Credentials
+from walletwatcher.trading.policy import Market
+
+
+class TradingGateway(Protocol):
+    """Implemented by TradingAPI and by the offline exchange used in tests."""
+
+    def begin_cycle(self) -> None: ...
+
+    def close(self) -> None: ...
+
+    def authority(self, credentials: Credentials) -> tuple[str, str | None]: ...
+
+    def market(self, ticker: str) -> Market: ...
+
+    def position(self, address: str, market: Market, fresh: bool = False) -> tuple[Decimal, int]: ...
+
+    def fills(self, address: str, start: int, end: int,
+              fresh: bool = False, anchor: dict | None = None) -> list[dict]: ...
+
+    def mid(self, market: Market) -> Decimal: ...
+
+    def send(self, credentials: Credentials, vault: str | None, attempt: dict) -> dict: ...
+
+    def status(self, address: str, cloid: str) -> dict: ...

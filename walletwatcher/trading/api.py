@@ -1,60 +1,12 @@
 """Decimal-only perpetual orders; SDK is used only for offline signing."""
-from dataclasses import dataclass
-from decimal import Decimal, ROUND_CEILING, ROUND_FLOOR
-import re
 
 from eth_account import Account
 from hyperliquid.utils.signing import sign_l1_action
 
-
-class TradingError(ValueError):
-    """A safe, user-facing failure that must stop the rule."""
-
-
-def decimal(value):
-    result = Decimal(str(value))
-    if not result.is_finite():
-        raise TradingError('Invalid numeric response from Hyperliquid.')
-    return result
-
-
-def ticker_name(value):
-    if not re.fullmatch(r'(?:[a-zA-Z][a-zA-Z0-9_-]{0,31}:)?[a-zA-Z0-9][a-zA-Z0-9_.-]{0,63}', value):
-        raise TradingError('Invalid perpetual ticker. Use BTC or a full HIP-3 ticker such as xyz:EWZ.')
-    return value.upper() if ':' not in value else value.split(':')[0].lower() + ':' + value.split(':')[1].upper()
-
-
-def triggered(base, current):
-    base, current = decimal(base), decimal(current)
-    return base * current <= 0 or abs(current) * 10 < abs(base)
-
-
-@dataclass(frozen=True)
-class Market:
-    coin: str
-    dex: str
-    asset: int
-    decimals: int
-
-    def price(self, mid, buy):
-        raw = decimal(mid) * (Decimal('1.01') if buy else Decimal('0.99'))
-        if raw <= 0:
-            raise TradingError('Invalid market price.')
-        # Integer prices are always allowed. Otherwise <=5 significant figures
-        # and <=6-szDecimals decimal places. Round INTO the permitted 1% bound.
-        places = max(0, min(6 - self.decimals, 4 - raw.adjusted()))
-        result = raw.quantize(Decimal(1).scaleb(-places), rounding=ROUND_FLOOR if buy else ROUND_CEILING)
-        if result <= 0:
-            raise TradingError('Price cannot be represented within the 1% limit.')
-        return format(result, 'f')
-
-    def order(self, size, price):
-        size = decimal(size)
-        amount = abs(size)
-        if amount == 0 or amount != amount.quantize(Decimal(1).scaleb(-self.decimals)):
-            raise TradingError('Position size does not match the market precision.')
-        return dict(a=self.asset, b=size < 0, p=price, s=format(amount, 'f'),
-                    r=True, t={'limit': {'tif': 'Ioc'}})
+# Preserve imports used by integrations while policy is independent of the SDK.
+from walletwatcher.trading.policy import (
+    FillHistory, Market, TradingError, checkpoint, decimal, replay, ticker_name, triggered,
+)
 
 
 class TradingAPI:
@@ -128,15 +80,26 @@ class TradingAPI:
             raise TradingError('The saved key is not authorized to trade this account. Check your API wallet.')
         return signer, target if role == 'subAccount' else None
 
-    def fills(self, address, start, end):
-        # Conservative continuity guard: if 2000 recent fills do not reach our
-        # checkpoint, do not risk the exchange's 10000-fill retention boundary.
-        recent = self.request({'type': 'userFills', 'user': address, 'aggregateByTime': False})
-        if not isinstance(recent, list):
-            raise TradingError('Invalid fill history.')
-        if len(recent) >= 2000 and min(int(f['time']) for f in recent) > start:
-            raise TradingError('Fill history continuity cannot be verified. Please arm a new rule.')
-        result, cursor = {}, start
+    def fills(self, address, start, end, fresh=False, anchor=None):
+        anchor_id = (anchor['time'], anchor['coin'], str(anchor['tid'])) if anchor else None
+        cache_key = ('fills', address, start, end, anchor_id)
+        if not fresh and cache_key in self.cache:
+            return self.cache[cache_key]
+        if anchor is None:
+            # Bootstrap old/new rules once. Subsequent checks request only the
+            # interval since a retained fill, whose presence proves continuity.
+            recent = self.request({'type': 'userFills', 'user': address, 'aggregateByTime': False})
+            if not isinstance(recent, list):
+                raise TradingError('Invalid fill history.')
+            if len(recent) >= 2000 and min(int(f['time']) for f in recent) > start:
+                raise TradingError('Fill history continuity cannot be verified. Please arm a new rule.')
+            before = [f for f in recent if int(f['time']) <= start]
+            if before:
+                last = max(before, key=lambda f: (int(f['time']), int(f['tid'])))
+                anchor = dict(time=int(last['time']), coin=last['coin'], tid=str(last['tid']))
+        if anchor is not None and int(anchor['time']) > start:
+            raise TradingError('Fill history anchor is newer than the position checkpoint.')
+        result, cursor = {}, int(anchor['time']) if anchor else start
         for _ in range(25):
             page = self.request(dict(type='userFillsByTime', user=address, startTime=cursor,
                                      endTime=end, aggregateByTime=False))
@@ -151,7 +114,16 @@ class TradingAPI:
                     raise TradingError('Conflicting fill history.')
                 result[identity] = fill
             if len(page) < 500:
-                return sorted(result.values(), key=lambda f: (int(f['time']), int(f['tid'])))
+                if anchor:
+                    saved = result.get((str(anchor['tid']), anchor['coin']))
+                    if saved is None or int(saved['time']) != int(anchor['time']):
+                        raise TradingError('Fill history continuity cannot be verified: saved fill is missing or changed.')
+                values = sorted(result.values(), key=lambda f: (int(f['time']), int(f['tid'])))
+                last = values[-1] if values else None
+                tail = (dict(time=int(last['time']), coin=last['coin'], tid=str(last['tid'])) if last else None)
+                fills = FillHistory(values, tail)
+                self.cache[cache_key] = fills
+                return fills
             latest = max(int(f['time']) for f in page)
             if latest <= cursor or len(result) >= 10000:
                 raise TradingError('Fill history is truncated or ambiguous. Please arm a new rule.')
@@ -175,33 +147,3 @@ class TradingAPI:
 
     def status(self, address, cloid):
         return self.request({'type': 'orderStatus', 'user': address, 'oid': cloid})
-
-
-def replay(rule, current, timestamp, fills):
-    """Validate continuity and detect original-position closure, including round trips."""
-    previous = decimal(rule['own_size'])
-    if timestamp < rule['checkpoint']:
-        raise TradingError('Position snapshot moved backwards in time.')
-    ended = False
-    for fill in fills:
-        if (fill['coin'] != rule['ticker'] or int(fill['time']) < rule['checkpoint']
-                or (int(fill['time']) == rule['checkpoint']
-                    and str(fill['tid']) in rule.get('boundary', []))):
-            continue
-        start = decimal(fill['startPosition'])
-        amount = decimal(fill['sz'])
-        if start != previous or amount <= 0 or fill['side'] not in ('B', 'A'):
-            raise TradingError('Position history is incomplete or inconsistent.')
-        after = start + (amount if fill['side'] == 'B' else -amount)
-        if start == 0 or start * after <= 0:
-            ended = True
-        previous = after
-    if previous != current:
-        raise TradingError('Position and fill history do not agree; no order was sent.')
-    return ended
-
-
-def checkpoint(rule, current, timestamp, fills):
-    rule.update(own_size=str(current), checkpoint=timestamp,
-                boundary=[str(f['tid']) for f in fills
-                          if f['coin'] == rule['ticker'] and int(f['time']) == timestamp])
