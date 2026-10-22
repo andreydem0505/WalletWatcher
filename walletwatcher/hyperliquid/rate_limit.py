@@ -204,3 +204,30 @@ class RequestBudget:
     def cooldown_remaining(self):
         with self.lock:
             return max(0, self.blocked_until - self.clock())
+
+    def diagnostics(self):
+        """Read current usage and admission policy without reserving any weight."""
+        with self.lock:
+            now = self.clock()
+            used = sum(weight for stamp, weight, _ in self.calls if stamp > now - WINDOW_SECONDS)
+            pending = sum(max(demand.values()) for demand in self.trading_waiters.values() if demand)
+            cooldown = max(0, self.blocked_until - now)
+            pause = None
+            pause_reason = None
+            if self.closing_rules:
+                pause = 'automatic closing has priority'
+                pause_reason = 'trading_priority'
+            elif cooldown:
+                pause = 'exchange cooldown'
+                pause_reason = 'rate_limit'
+            else:
+                try:
+                    self._protect_scheduled_checks('clearinghouseState', now, REQUEST_WEIGHTS['clearinghouseState'])
+                except DataFetchError as error:
+                    pause = 'capacity reserved for scheduled autoclose checks'
+                    pause_reason = error.reason
+                if pause is None and used + pending + REQUEST_WEIGHTS['clearinghouseState'] > self.limit:
+                    pause = 'request budget is busy'
+                    pause_reason = 'budget'
+            return dict(used=used, limit=self.limit, cooldown=cooldown, pending=pending,
+                        scheduled=bool(self.scheduled_checks), monitor_pause=pause, monitor_pause_reason=pause_reason)

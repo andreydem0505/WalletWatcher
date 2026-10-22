@@ -2,7 +2,7 @@
 from decimal import Decimal
 from typing import Protocol
 
-from walletwatcher.storage.credentials import Credentials
+from walletwatcher.domain.credentials import Credentials
 from walletwatcher.trading.policy import Market
 
 

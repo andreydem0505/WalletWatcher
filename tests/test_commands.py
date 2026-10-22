@@ -22,7 +22,7 @@ class CommandBehaviorTests(ApplicationFixture):
             for syntax in ('/addwallet <address>', '/removewallet <address>',
                            '/settag <address> <tag>', '/creds <address> <private_key>', '/my',
                            '/autoclose <wallet> <ticker>', '/cancelautoclose <wallet> <ticker>',
-                           '/autocloses', '/intersections'):
+                           '/autocloses', '/intersections', '/health', '/wallet <address>'):
                 self.assertIn(syntax, text)
             self.assertNotIn('/help', text)
             self.assertNotRegex(text, '[А-Яа-яЁё]')
@@ -88,8 +88,8 @@ class CommandBehaviorTests(ApplicationFixture):
 
     def test_unreadable_wallet_order_keeps_status_available(self):
         self.app.accounts = {WALLET: Account()}
-        with patch('walletwatcher.app.load_accounts', side_effect=PermissionError()), \
-                self.assertLogs('walletwatcher.app', level='WARNING'):
+        with patch('walletwatcher.services.monitoring.load_accounts', side_effect=PermissionError()), \
+                self.assertLogs('walletwatcher.services.monitoring', level='WARNING'):
             self.app.handle_message(self.message('status'))
         self.assertTrue(self.jobs()[0]['text'].startswith('Wallets: 1\n'))
         self.assertIn(f'<code>{WALLET}</code>', self.jobs()[0]['text'])
@@ -126,7 +126,7 @@ class CommandBehaviorTests(ApplicationFixture):
         account = Account('original')
         self.app.accounts = {WALLET: account}
         save_wallets(self.app.accounts, self.config.wallets_file)
-        with patch('walletwatcher.app.save_wallets', side_effect=OSError('disk full')), self.assertLogs('walletwatcher.app', level='ERROR'):
+        with patch('walletwatcher.services.monitoring.save_wallets', side_effect=OSError('disk full')), self.assertLogs('walletwatcher.presentation.telegram', level='ERROR'):
             self.app.handle_message(self.message(f'/settag {WALLET} changed'))
         self.assertIs(self.app.accounts[WALLET], account)
         self.assertEqual(account.tag, 'original')

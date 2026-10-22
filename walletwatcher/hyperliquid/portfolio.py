@@ -5,8 +5,9 @@ import threading
 import requests
 
 from walletwatcher.hyperliquid.errors import DataFetchError
-from walletwatcher.presentation.formatting import label, number
-from walletwatcher.presentation.portfolio import Portfolio, parse_positions
+from walletwatcher.domain.validation import label, number
+from walletwatcher.domain.portfolio import Portfolio
+from walletwatcher.hyperliquid.parsing import parse_positions
 
 
 ABSTRACTION_MODES = ('disabled', 'default', 'dexAbstraction', 'unifiedAccount', 'portfolioMargin')
@@ -41,7 +42,7 @@ def fetch_portfolio(wallet, *, send_request, read_snapshot, session_factory, bin
         bind_heartbeat(heartbeat)
         return read_snapshot(wallet)
 
-    # This pool and its HTTP sessions exist only for the current /my job.
+    # This pool and its HTTP sessions exist only for the current portfolio job.
     pool = ThreadPoolExecutor(max_workers=4, thread_name_prefix='personal-api')
     try:
         states_future = pool.submit(snapshot)

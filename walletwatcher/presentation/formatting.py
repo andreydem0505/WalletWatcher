@@ -1,22 +1,11 @@
-"""API parsing and safe Telegram HTML; truncate only complete sections."""
-import math
+"""Safe Telegram HTML; legacy parsing imports remain available."""
 from html import escape
 from urllib.parse import quote
 
 from walletwatcher.domain.models import Account, Position, Trade
-
-
-def number(value) -> float:
-    result = float(value)
-    if not math.isfinite(result):
-        raise ValueError('Non-finite number in API response')
-    return result
-
-
-def label(value, limit=64) -> str:
-    if not isinstance(value, str) or not value or len(value) > limit:
-        raise ValueError('Invalid text field in API response')
-    return value
+from walletwatcher.domain.validation import label, number
+# Compatibility exports; API adapters import parsing directly.
+from walletwatcher.hyperliquid.parsing import format_position, format_trade
 
 
 def format_number(num: float) -> str:
@@ -27,32 +16,6 @@ def format_number(num: float) -> str:
         magnitude += 1
         num /= 1000
     return f'{num:.3g}{suffixes[magnitude]}'
-
-
-def format_position(data: dict) -> Position:
-    position = data['position']
-    size = number(position['szi'])
-    entry = position['entryPx']
-    if entry is not None:
-        number(entry)
-    max_leverage = position.get('maxLeverage')
-    if max_leverage is not None:
-        max_leverage = number(max_leverage)
-        if max_leverage <= 0:
-            raise ValueError('Invalid maximum leverage in API response')
-    return Position(label(position['coin']), 'Short' if size < 0 else 'Long',
-                    number(position['leverage']['value']), label(position['leverage']['type']),
-                    size, label(str(entry)) if entry is not None else None, abs(number(position['positionValue'])),
-                    number(position['unrealizedPnl']), max_leverage=max_leverage)
-
-
-def format_trade(data: dict) -> Trade:
-    number(data['px'])
-    number(data['sz'])
-    timestamp = int(data['time'])
-    if timestamp < 0:
-        raise ValueError('Negative trade timestamp')
-    return Trade(label(data['coin']), label(str(data['px'])), label(str(data['sz'])), label(data['dir']), timestamp)
 
 
 def position_block(pos: Position, previous=None) -> str:

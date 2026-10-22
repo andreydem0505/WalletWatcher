@@ -88,7 +88,10 @@ class RuleTests(ApplicationFixture):
         self.app.accounts[WALLET] = Account()
         self.app.credentials.save(1, OTHER, KEY)
         self.exchange = Exchange(self.clock)
-        self.worker = AutocloseWorker(self.app, self.app.autoclose_store, self.exchange, self.clock)
+        self.worker = AutocloseWorker(
+            self.app.autoclose_store, self.exchange, credentials=self.app.credentials,
+            access=self.app.autoclose_access, requests=self.app.client,
+            stop=self.app.stop, clock=self.clock)
         self.store = self.app.autoclose_store
 
     def command(self, text, user=1, kind='private', chat=None):
@@ -206,7 +209,10 @@ class RuleTests(ApplicationFixture):
         self.trigger()
         self.assertIn('pending', self.store.active()[0])
         replacement = AutocloseStore(self.queue, '12345')
-        self.worker = AutocloseWorker(self.app, replacement, self.exchange, self.clock)
+        self.worker = AutocloseWorker(
+            replacement, self.exchange, credentials=self.app.credentials,
+            access=self.app.autoclose_access, requests=self.app.client,
+            stop=self.app.stop, clock=self.clock)
         self.reconcile()
         self.assertEqual(self.state()['state'], 'done')
         self.assertEqual(len(self.exchange.orders), 1)
@@ -230,7 +236,10 @@ class RuleTests(ApplicationFixture):
         self.exchange.fraction = Decimal('.5')
         self.trigger()
         self.reconcile()  # resolves 1, sends 2
-        self.worker = AutocloseWorker(self.app, self.store, self.exchange, self.clock)
+        self.worker = AutocloseWorker(
+            self.store, self.exchange, credentials=self.app.credentials,
+            access=self.app.autoclose_access, requests=self.app.client,
+            stop=self.app.stop, clock=self.clock)
         self.reconcile()  # resolves 2, sends 3
         self.reconcile()  # resolves 3, reports remainder
         self.assertEqual(len(self.exchange.orders), 3)
@@ -358,7 +367,10 @@ class RuleTests(ApplicationFixture):
         self.command(f'/autoclose {WALLET} BTC')
         other = AutocloseStore(self.queue, 'other-bot')
         self.assertFalse(other.active())
-        self.worker = AutocloseWorker(self.app, AutocloseStore(self.queue, '12345'), self.exchange, self.clock)
+        self.worker = AutocloseWorker(
+            AutocloseStore(self.queue, '12345'), self.exchange, credentials=self.app.credentials,
+            access=self.app.autoclose_access, requests=self.app.client,
+            stop=self.app.stop, clock=self.clock)
         self.worker.cycle()
         self.assertEqual(self.state()['state'], 'armed')
 
@@ -543,7 +555,10 @@ class RuleTests(ApplicationFixture):
         self.trigger()
         rule = self.store.active()[0]
         self.assertTrue(self.worker.reconcile(rule, Decimal(0), self.exchange.history))
-        self.worker = AutocloseWorker(self.app, AutocloseStore(self.queue, '12345'), self.exchange, self.clock)
+        self.worker = AutocloseWorker(
+            AutocloseStore(self.queue, '12345'), self.exchange, credentials=self.app.credentials,
+            access=self.app.autoclose_access, requests=self.app.client,
+            stop=self.app.stop, clock=self.clock)
         self.reconcile()
         self.assertEqual(self.state()['state'], 'done')
         self.assertEqual(len(self.exchange.orders), 1)
@@ -559,7 +574,7 @@ class RuleTests(ApplicationFixture):
 
     def test_command_storage_failure_is_safe(self):
         with patch.object(self.store, 'create', side_effect=RuntimeError(KEY)), \
-                self.assertLogs('walletwatcher.app', level='ERROR') as logs:
+                self.assertLogs('walletwatcher.presentation.telegram', level='ERROR') as logs:
             self.command(f'/autoclose {WALLET} BTC')
         self.assertNotIn(KEY, ''.join(logs.output))
         self.assertIn('no activation', self.jobs()[-1]['text'])
@@ -571,7 +586,10 @@ class RuleTests(ApplicationFixture):
         order = self.exchange.market_value.order('10', '99')
         self.store.prepare(rule, SIGNER, order, self.clock())
         self.exchange.unknown = True
-        self.worker = AutocloseWorker(self.app, self.store, self.exchange, self.clock)
+        self.worker = AutocloseWorker(
+            self.store, self.exchange, credentials=self.app.credentials,
+            access=self.app.autoclose_access, requests=self.app.client,
+            stop=self.app.stop, clock=self.clock)
         self.reconcile()
         self.assertFalse(self.exchange.orders)
         self.clock.advance(30)
@@ -632,7 +650,10 @@ class RuleTests(ApplicationFixture):
         outbox = DeliveryQueue(self.sender, self.config.database_file, clock=self.clock)
         self.addCleanup(outbox.close)
         restored = Application(self.config, bot=self.sender, client=self.client, outbox=outbox)
-        worker = AutocloseWorker(restored, restored.autoclose_store, self.exchange, self.clock)
+        worker = AutocloseWorker(
+            restored.autoclose_store, self.exchange, credentials=restored.credentials,
+            access=restored.autoclose_access, requests=restored.client,
+            stop=restored.stop, clock=self.clock)
         self.clock.advance(3)
         worker.cycle()
         self.assertEqual(self.state()['state'], 'done')
@@ -665,7 +686,10 @@ class RuleTests(ApplicationFixture):
                 client = HyperliquidClient(personal_session_factory=lambda: session, clock=self.clock)
                 api = TradingAPI(client)
                 self.addCleanup(api.close)
-                self.worker = AutocloseWorker(self.app, self.store, api, self.clock)
+                self.worker = AutocloseWorker(
+                    self.store, api, credentials=self.app.credentials,
+                    access=self.app.autoclose_access, requests=self.app.client,
+                    stop=self.app.stop, clock=self.clock)
                 def post(url, json, timeout):
                     if url.endswith('/exchange'):
                         vault = OTHER if subaccount else None

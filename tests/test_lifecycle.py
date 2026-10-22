@@ -76,7 +76,7 @@ class LifecycleTests(ApplicationFixture):
         self.app.accounts = {WALLET: Account(next_poll=self.clock() + 60)}
         with patch.object(self.app.stop, 'is_set', side_effect=[False, False, True]), \
                 patch.object(self.app.stop, 'wait'), \
-                patch('walletwatcher.app.time.monotonic', self.clock):
+                patch('time.monotonic', self.clock):
             self.app.monitor(Mock())
         self.client.fetch_open_positions.assert_not_called()
 
@@ -98,7 +98,7 @@ class PollingCooldownTests(ApplicationFixture):
             self.assertGreaterEqual(self.clock(), deadline)
             return self.stop_polling(**kwargs)
         self.sender.get_updates.side_effect = fetch
-        with patch('walletwatcher.app.time.time', self.clock), \
+        with patch('time.time', self.clock), \
                 patch.object(self.app.stop, 'wait', side_effect=self.advance_time):
             self.app.polling(heartbeat)
         self.sender.get_updates.assert_called_once()
@@ -114,9 +114,9 @@ class PollingCooldownTests(ApplicationFixture):
             self.assertGreaterEqual(self.clock(), started + 3)
             return self.stop_polling(**kwargs)
         self.sender.get_updates.side_effect = fetch
-        with patch('walletwatcher.app.time.time', self.clock), patch('walletwatcher.app.time.monotonic', self.clock), \
+        with patch('time.time', self.clock), patch('time.monotonic', self.clock), \
                 patch.object(self.app.stop, 'wait', side_effect=self.advance_time), \
-                self.assertLogs('walletwatcher.app', level='WARNING'):
+                self.assertLogs('walletwatcher.presentation.telegram', level='WARNING'):
             self.app.polling(Mock())
         self.assertEqual(self.sender.get_updates.call_count, 2)
         self.assertEqual(float(self.queue.get_metadata('telegram_flood_until')), started + 3)

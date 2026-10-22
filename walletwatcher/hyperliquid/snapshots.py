@@ -7,7 +7,7 @@ import time
 import websocket
 
 from walletwatcher.hyperliquid.errors import DataFetchError
-from walletwatcher.presentation.formatting import label
+from walletwatcher.domain.validation import label
 
 WS_URL = 'wss://api.hyperliquid.xyz/ws'
 

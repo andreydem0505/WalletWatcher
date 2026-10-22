@@ -10,24 +10,39 @@ alert started, P&L, and a link to Hyperdash.
 
 ```text
 walletwatcher/
-  app.py             Telegram commands and application workers
+  app.py             Dependency assembly, compatibility facade and worker lifecycle
   config.py          Environment configuration and project paths
-  domain/            Position models and time helpers
-  hyperliquid/       HTTP facade, shared request budget and on-demand portfolio reads
+  domain/            Position/portfolio/credential values and pure validation
+  services/          Monitoring, portfolio queue, diagnostics and live access policy
+  hyperliquid/       API parsing, HTTP facade, shared budget and portfolio reads
   storage/           Wallet files, encrypted credentials and delivery queue
   trading/           Pure trading policy, exchange gateway and autoclose execution
-  presentation/      Command responses, alerts and personal portfolio formatting
+  presentation/      Telegram controller, command responses and portfolio formatting
   infrastructure/    Logging, watchdogs, process supervisor and health check
 tests/               Offline regression tests and an opt-in live API check
 ```
 
 `hyperliquid/client.py` keeps the shared API facade. `rate_limit.py` owns rolling
 request accounting and dynamic trading priority; `snapshots.py` owns WebSocket
-connection limits; `portfolio.py` owns the temporary sessions used by `/my`.
+connection limits; `portfolio.py` owns the temporary sessions used by `/my` and
+`/wallet`. `parsing.py` translates API JSON into domain values without importing
+Telegram presentation. Domain values and validation have no adapter or external
+package dependencies. Existing model/parser imports remain available through
+compatibility exports in the old presentation and credentials modules.
 `trading/policy.py` contains Decimal calculations and position lifecycle checks
 without HTTP or SDK dependencies. `TradingGateway` describes the exchange
 operations used by the autoclose worker, and `TradingAPI` implements them using
 the managed client. Persistent rule/attempt formats are unchanged.
+`Application` composes these adapters and supervises workers. The Telegram
+controller parses commands; monitoring and portfolio services own their state
+and loops. Shared settings keep access changes visible to every service.
+The autoclose worker receives credentials, live access checks, shared request
+control and shutdown explicitly through narrow contracts in `trading/ports.py`;
+it neither receives the application nor constructs an exchange adapter.
+Existing command/worker entry points and the `PortfolioRequest` import remain
+available as a compatibility facade without duplicate state.
+Architecture tests guard layer boundaries, compatibility imports and static
+import cycles alongside behavioral regression tests.
 
 Docker copies the `walletwatcher` package into `/app` and starts
 `python -m walletwatcher.infrastructure.supervisor`; the supervisor starts the
@@ -152,11 +167,15 @@ Commands:
 - `/settag 0x... some tag` (at most 100 characters, without semicolons/newlines)
 - `/creds <address> <private key API wallet>` (private chat only)
 - `/my` (private chat only)
+- `/wallet <address>` — fresh portfolio for any public address, in the `/my`
+  format; no credentials or monitoring registration required.
 - `/autoclose <wallet> <ticker>` (private chat only)
 - `/cancelautoclose <wallet> <ticker>` (private chat only)
 - `/autocloses` — list your active rules (private chat only, no arguments).
 - `/intersections` — list positions in tickers held by at least two tracked
   wallets (no arguments).
+- `/health` — local worker, monitoring, API budget and Telegram delivery diagnostics
+  (no arguments; replies only to the requesting authorized chat).
 - Any other text shows wallets, per-wallet last successful update, failure
   counts and the number of queued notifications.
 
@@ -181,11 +200,38 @@ refresh rules. Wallets without a first successful snapshot are excluded with a
 notice. Authorized private and group chats can request the report without
 personal credentials; it is sent only to the requesting chat.
 
+`/health` reads local state without contacting Hyperliquid, decrypting credentials,
+reserving request weight or restarting workers. A healthy response is three short
+lines: overall status, wallet/worker counts, API weight and pending notifications.
+Private chats add your active rule count; active portfolio requests and routine
+autoclose priority may add a short status line.
+
+Only affected components receive detailed sections. Monitoring expands for failed
+or never-checked wallets, a missing cycle, or data/cycles older than
+`max(60 seconds, 3 * POLL_INTERVAL)`. All five workers must be present and running.
+API details expand for exchange cooldown, waiting trading requests or an exhausted
+budget; yielding to scheduled/triggered autoclose alone is normal. Telegram
+details expand for retries, delivery cooldown, chat wait over 10 seconds or a
+notification overdue by more than 30 seconds (age measured from its due time).
+Ordinary short delivery throttling and ready queue entries do not signal errors.
+Detailed responses include uptime, but omit healthy components' diagnostics. A
+recent monitor cycle alone does not establish that wallet data is fresh.
+
+In an authenticated private chat, current activation/check errors or unconfirmed
+orders expand your queued/armed/closing counts and error details (including
+terminal rules still awaiting reconciliation). It does not list historical failures that
+have already completed. Groups and mismatched private identities receive only
+shared operational counters. Other users' trading details and notification
+contents are never included. Reports use the normal durable delivery queue and
+remain subject to Telegram delivery waits. Diagnostic reads leave worker
+heartbeats, trading priority, rule state and request accounting unchanged.
+
 ### Personal account commands
 
 Add your personal Telegram chat ID to `CHAT_IDS` to use these commands in a
-private conversation with the bot. Group chats cannot register credentials or
-request a personal portfolio. Credentials are bound to the authenticated
+private conversation with the bot. Group chats cannot use `/creds` or `/my`;
+`/wallet <address>` is available in any authorized chat for an explicitly supplied
+public address. Credentials are bound to the authenticated
 `message.from_user.id` and the bot identity; replies go only to that user,
 including in `MODE=TEST`.
 
@@ -212,8 +258,11 @@ or regenerate it after credentials have been saved. Encrypting the database
 does not protect against an attacker who can read both the database and this
 key file or control the running application.
 
-`/my` uses only your saved public address and fetches a fresh snapshot. Only
-when the command is requested, a dedicated supervised `personal` worker opens a WebSocket subscription to
+`/my` uses only your saved public address and fetches a fresh snapshot.
+`/wallet <address>` uses the supplied address and the identical balance/position
+formatter, including prices, P&L, funding and TP/SL. It neither reads nor changes
+credentials or the tracked wallet list. Only when either command is requested,
+the dedicated supervised `personal` worker opens a WebSocket subscription to
 `allDexsClearinghouseState`, receives the main and HIP-3 account states together,
 and closes the connection before requesting prices and TP/SL for occupied DEXs.
 The account-mode request runs alongside the snapshot. Then prices, TP/SL and
@@ -222,18 +271,23 @@ four request threads per command. Each HTTP thread owns a separate session;
 these sessions close when the command finishes. Personal API requests do not
 hold the monitor's HTTP connection lock. Both paths use one thread-safe IP
 weight budget and 429 cooldown; an API limit can still defer both paths.
-Telegram polling queues `/my` and continues accepting commands while the
-personal worker fetches the result. At most 32 requests can wait in memory;
-repeated `/my` from the same user shares that user's pending result. If the
-queue is full, the bot asks the user to retry later. A changed account address
-during fetching prevents the old portfolio from being sent. Requests awaiting
-collection are not persisted; repeat `/my` after a process restart. Once a
+Telegram polling queues `/my` and `/wallet` and continues accepting commands while
+the personal worker fetches the result. At most 32 requests can wait in memory;
+repeated `/my` from the same user shares that user's pending result. Repeated
+`/wallet` for the same normalized address and chat shares its queued/in-flight
+result; different addresses and chats remain independent. The two commands share
+the same bounded queue and worker. If the queue is full, the bot asks the user to
+retry later. A changed account address
+during fetching prevents the old `/my` portfolio from being sent, while an explicit
+`/wallet` address remains independent of credentials changes. Revoked chat access
+or shutdown discards queued/in-flight results and errors. Requests awaiting
+collection are not persisted; repeat `/my` or `/wallet` after a process restart. Once a
 result is queued for Telegram delivery, the existing durable outbox applies.
 No connection or background subscription is kept between commands. Connection
 setup has a 5-second timeout, snapshot collection a 20-second overall deadline,
 and closing the socket waits at most 1 second. At most 30 connection attempts
 per minute are allowed per client, including failed attempts. There is no
-automatic reconnect or fallback to a sequential DEX scan; repeat `/my` after a
+automatic reconnect or fallback to a sequential DEX scan; repeat `/my` or `/wallet` after a
 failure. This is independent of the monitor's `PERP_DEXS` filter and does not
 change monitoring. Spot positions are not listed. Long portfolios
 are split into multiple complete HTML messages, without omitting positions.

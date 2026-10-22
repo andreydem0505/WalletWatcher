@@ -53,22 +53,41 @@ class WorkerSupervisor:
             self.workers[name]['heartbeat'] = self.clock()
 
     def add(self, name, target):
-        self.workers[name] = dict(target=target, thread=None, heartbeat=self.clock(), restart_at=0)
+        with self.lock:
+            self.workers[name] = dict(target=target, thread=None, heartbeat=self.clock(), restart_at=0)
         self._start(name)
 
     def _start(self, name):
         worker = self.workers[name]
-        worker['heartbeat'] = self.clock()
-        worker['restart_at'] = self.clock() + 5
-
         def guarded():
             try:
                 worker['target'](lambda: self.beat(name))
             except Exception:
                 logging.getLogger(__name__).exception('Worker %s crashed', name)
 
-        worker['thread'] = threading.Thread(target=guarded, name=name, daemon=True)
-        worker['thread'].start()
+        with self.lock:
+            worker['heartbeat'] = self.clock()
+            worker['restart_at'] = self.clock() + 5
+            worker['thread'] = threading.Thread(target=guarded, name=name, daemon=True)
+            worker['thread'].start()
+
+    def diagnostics(self):
+        """Return copied liveness data without restarting or touching workers."""
+        with self.lock:
+            now = self.clock()
+            result = {}
+            for name, worker in self.workers.items():
+                age = max(0, now - worker['heartbeat'])
+                thread = worker['thread']
+                if thread is None:
+                    state = 'starting'
+                elif not thread.is_alive():
+                    state = 'stopped' if self.stop.is_set() else 'awaiting restart'
+                else:
+                    state = 'stalled' if age > self.timeout else 'running'
+                result[name] = dict(state=state, heartbeat_age=age,
+                                    restart_in=max(0, worker['restart_at'] - now))
+            return result
 
     def check(self):
         for name, worker in self.workers.items():

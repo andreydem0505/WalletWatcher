@@ -6,7 +6,7 @@ from typing import Optional
 import requests
 import websocket
 
-from walletwatcher.presentation.formatting import format_position, format_trade
+from walletwatcher.hyperliquid.parsing import format_position, format_trade
 from walletwatcher.domain.models import Position, Trade
 from walletwatcher.hyperliquid.errors import DataFetchError
 from walletwatcher.hyperliquid.rate_limit import RequestBudget, retry_delay
@@ -70,6 +70,9 @@ class HyperliquidClient:
 
     def schedule_trading_check(self, weight, delay, **forecast):
         self.budget.schedule_trading_check(weight, delay, **forecast)
+
+    def request_status(self):
+        return self.budget.diagnostics()
 
     retry_delay = staticmethod(retry_delay)
 

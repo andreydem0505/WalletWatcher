@@ -1,5 +1,4 @@
 """Per-user API-wallet credentials, encrypted before being written to SQLite."""
-from dataclasses import dataclass, field
 import os
 from pathlib import Path
 import re
@@ -8,13 +7,9 @@ import hashlib
 from cryptography.fernet import Fernet
 from cryptography.hazmat.primitives.asymmetric import ec
 
+# Preserve the historical Credentials import path.
+from walletwatcher.domain.credentials import Credentials
 from walletwatcher.storage.wallets import normalize_wallet
-
-
-@dataclass(frozen=True)
-class Credentials:
-    address: str
-    private_key: str = field(repr=False)
 
 
 def normalize_private_key(value):

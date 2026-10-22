@@ -21,7 +21,10 @@ class ClosingTests(ApplicationFixture):
         self.app.credentials.save(1, OTHER, KEY)
         self.store = self.app.autoclose_store
         self.exchange = Exchange(self.clock)
-        self.worker = AutocloseWorker(self.app, self.store, self.exchange, self.clock)
+        self.worker = AutocloseWorker(
+            self.store, self.exchange, credentials=self.app.credentials,
+            access=self.app.autoclose_access, requests=self.app.client,
+            stop=self.app.stop, clock=self.clock)
         self.rule = self.store.create(1, WALLET, 'BTC', self.app.credentials.version(1))
         self.worker.cycle()
         self.session = Mock()
@@ -30,6 +33,7 @@ class ClosingTests(ApplicationFixture):
         self.http = HyperliquidClient(self.session, clock=self.clock)
         self.addCleanup(self.http.close)
         self.app.client = self.http
+        self.worker.requests = self.http
 
     def rule_state(self):
         return json.loads(self.queue.db.execute('SELECT data FROM autoclose_rules WHERE id=?',
@@ -96,7 +100,10 @@ class ClosingTests(ApplicationFixture):
         self.assertTrue(self.rule_state()['close_priority'])
         self.http.sync_close_priorities(set())  # Simulate a fresh process's empty limiter.
         replacement = AutocloseStore(self.queue, '12345')
-        self.worker = AutocloseWorker(self.app, replacement, self.exchange, self.clock)
+        self.worker = AutocloseWorker(
+            replacement, self.exchange, credentials=self.app.credentials,
+            access=self.app.autoclose_access, requests=self.app.client,
+            stop=self.app.stop, clock=self.clock)
         observed = []
         self.exchange.begin_cycle.side_effect = lambda: observed.append(self.normal_request())
         self.worker.cycle()
@@ -122,7 +129,10 @@ class ClosingTests(ApplicationFixture):
         self.assertIn('worker was interrupted', self.jobs()[-1]['text'])
         self.assertNotIn(KEY, self.jobs()[-1]['text'])
         self.assertEqual(self.normal_request(), 'trading_priority')
-        self.worker = AutocloseWorker(self.app, self.store, self.exchange, self.clock)
+        self.worker = AutocloseWorker(
+            self.store, self.exchange, credentials=self.app.credentials,
+            access=self.app.autoclose_access, requests=self.app.client,
+            stop=self.app.stop, clock=self.clock)
         self.worker.cycle()
         self.assertEqual(self.normal_request(), 'sent')
         self.assertEqual(len(self.exchange.orders), 1)
@@ -169,7 +179,10 @@ class ClosingTests(ApplicationFixture):
         self.assertEqual(self.normal_request(), 'trading_priority')
         unverified = [job for job in self.jobs() if 'not yet verified' in job['text']]
         self.assertEqual(len(unverified), 1)
-        self.worker = AutocloseWorker(self.app, self.store, self.exchange, self.clock)
+        self.worker = AutocloseWorker(
+            self.store, self.exchange, credentials=self.app.credentials,
+            access=self.app.autoclose_access, requests=self.app.client,
+            stop=self.app.stop, clock=self.clock)
         self.worker.cycle()
         self.assertEqual(len([job for job in self.jobs() if 'not yet verified' in job['text']]), 1)
         self.clock.advance(30)
@@ -208,7 +221,10 @@ class ClosingTests(ApplicationFixture):
             self.worker.cycle()
         self.assertEqual(len(self.jobs()), before + 2)
         self.assertIn('HTTP 429', self.jobs()[-1]['text'])
-        self.worker = AutocloseWorker(self.app, self.store, self.exchange, self.clock)
+        self.worker = AutocloseWorker(
+            self.store, self.exchange, credentials=self.app.credentials,
+            access=self.app.autoclose_access, requests=self.app.client,
+            stop=self.app.stop, clock=self.clock)
         with patch.object(self.exchange, 'authority', side_effect=DataFetchError('busy', reason='rate_limit', status_code=429)):
             self.worker.cycle()
         self.assertEqual(len(self.jobs()), before + 2)
@@ -229,7 +245,10 @@ class ClosingTests(ApplicationFixture):
         self.exchange.reject = True
         self.trigger()
         self.assertIn('IOC order was rejected', self.jobs()[-1]['text'])
-        self.worker = AutocloseWorker(self.app, self.store, self.exchange, self.clock)
+        self.worker = AutocloseWorker(
+            self.store, self.exchange, credentials=self.app.credentials,
+            access=self.app.autoclose_access, requests=self.app.client,
+            stop=self.app.stop, clock=self.clock)
         self.worker.cycle()  # Reconcile only: minimum retry interval has not elapsed.
         self.assertEqual(len([job for job in self.jobs() if 'IOC order was rejected' in job['text']]), 1)
         for _ in range(3):

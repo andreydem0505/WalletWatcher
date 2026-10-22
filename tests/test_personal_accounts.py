@@ -235,7 +235,7 @@ class PersonalCommandTests(ApplicationFixture):
         self.save()
         self.deliver_pending()
         self.client.fetch_portfolio.side_effect = DataFetchError('unavailable')
-        with self.assertLogs('walletwatcher.app', level='WARNING'):
+        with self.assertLogs('walletwatcher.services.portfolios', level='WARNING'):
             self.app.handle_message(self.personal('/my'))
             self.assertTrue(self.app.process_personal_request())
         self.assertIn('свежие данные', self.jobs()[0]['text'])
@@ -243,7 +243,7 @@ class PersonalCommandTests(ApplicationFixture):
 
     def test_storage_failure_does_not_log_or_echo_private_key(self):
         with patch.object(self.app.credentials, 'save', side_effect=RuntimeError(KEY)), \
-                self.assertLogs('walletwatcher.app', level='ERROR') as logs:
+                self.assertLogs('walletwatcher.presentation.telegram', level='ERROR') as logs:
             self.save()
         self.assertNotIn(KEY, '\n'.join(logs.output))
         self.assertNotIn(KEY, self.jobs()[0]['text'])
@@ -259,7 +259,7 @@ class PersonalCommandTests(ApplicationFixture):
         error = apihelper.ApiTelegramException('delete', None,
             dict(error_code=429, description='flood wait', parameters=dict(retry_after=20)))
         self.sender.delete_message.side_effect = error
-        with self.assertLogs('walletwatcher.app', level='WARNING'):
+        with self.assertLogs('walletwatcher.presentation.telegram', level='WARNING'):
             self.save()
         self.assertEqual(self.app.credentials.load(1).private_key, KEY)
         self.assertEqual(float(self.queue.get_metadata('telegram_flood_until')), self.clock() + 21)
@@ -269,7 +269,7 @@ class PersonalCommandTests(ApplicationFixture):
         error = apihelper.ApiTelegramException('delete', None,
             dict(error_code=429, description='flood wait', parameters=dict(retry_after='nan')))
         self.sender.delete_message.side_effect = error
-        with self.assertLogs('walletwatcher.app', level='WARNING'):
+        with self.assertLogs('walletwatcher.presentation.telegram', level='WARNING'):
             self.save()
         self.assertEqual(float(self.queue.get_metadata('telegram_flood_until')), self.clock() + 31)
 

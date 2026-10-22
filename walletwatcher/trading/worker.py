@@ -2,14 +2,15 @@
 import logging
 from hashlib import sha256
 import time
+from threading import Event
 from dataclasses import asdict
 from decimal import Decimal
 from typing import Callable
 
 from walletwatcher.hyperliquid.errors import DataFetchError
 from walletwatcher.hyperliquid.rate_limit import REQUEST_WEIGHTS, WINDOW_SECONDS
-from walletwatcher.trading.api import TradingAPI
 from walletwatcher.trading.gateway import TradingGateway
+from walletwatcher.trading.ports import CredentialReader, RuleAccess, TradingRequests
 from walletwatcher.trading.policy import (
     ACTIVATION_TIMEOUT, MAX_CLOSE_ATTEMPTS, MIN_RETRY_INTERVAL, ORDER_CONFIRMATION_GRACE_MS,
     Market, TradingError, checkpoint, decimal, replay, triggered,
@@ -19,28 +20,28 @@ logger = logging.getLogger(__name__)
 
 
 class AutocloseWorker:
-    def __init__(self, app, store, api: TradingGateway | None = None,
+    def __init__(self, store, api: TradingGateway, *, credentials: CredentialReader,
+                 access: RuleAccess, requests: TradingRequests, stop: Event,
                  clock: Callable[[], float] = time.time):
-        self.app, self.store = app, store
-        self.api = api or TradingAPI(app.client)
+        self.store, self.api = store, api
+        self.credentials, self.access = credentials, access
+        self.requests, self.stop = requests, stop
         self.clock = clock
         self.closing_rules = set()
 
     def valid(self, rule):
-        with self.app.lock:
-            tracked = rule['wallet'] in self.app.accounts
-        return (tracked and rule['user'] in self.app.config.chat_ids
-                and self.app.credentials.version(rule['user']) == rule['version'])
+        return (self.access.tracks_wallet(rule['wallet']) and self.access.allows_user(rule['user'])
+                and self.credentials.version(rule['user']) == rule['version'])
 
     def finish(self, rule, state, reason, update_terminal=False, attempt=None):
         self.store.finish(rule, state, f"Autoclose {rule['ticker']}: {reason}",
-                          notify=rule['user'] in self.app.config.chat_ids, update_terminal=update_terminal,
+                          notify=self.access.allows_user(rule['user']), update_terminal=update_terminal,
                           attempt=attempt)
         self.closing_rules.discard(rule['id'])
-        self.app.client.set_close_priority(rule['id'], False)
+        self.requests.set_close_priority(rule['id'], False)
 
     def set_close_priority(self, rule, enabled):
-        self.app.client.set_close_priority(rule['id'], enabled)
+        self.requests.set_close_priority(rule['id'], enabled)
         if enabled:
             self.closing_rules.add(rule['id'])
         else:
@@ -51,7 +52,7 @@ class AutocloseWorker:
 
     def notify_attempt_issue(self, rule, attempt, kind, explanation):
         """Journal the notice with the attempt so retries/restarts cannot spam it."""
-        if kind in attempt.get('notices', []) or rule['user'] not in self.app.config.chat_ids:
+        if kind in attempt.get('notices', []) or not self.access.allows_user(rule['user']):
             return
         attempt.setdefault('notices', []).append(kind)
         self.store.notify(rule, f"Autoclose {rule['ticker']}: attempt {attempt['number']}/{MAX_CLOSE_ATTEMPTS}: "
@@ -69,7 +70,7 @@ class AutocloseWorker:
                     update_terminal, attempt)
 
     def arm(self, rule):
-        credentials = self.app.credentials.load(rule['user'])
+        credentials = self.credentials.load(rule['user'])
         if credentials is None:
             raise TradingError('Credentials are missing. Save them with /creds first.')
         rule['activation_stage'] = 'checking trading permissions'
@@ -237,7 +238,7 @@ class AutocloseWorker:
 
     def submit_close(self, rule, market, current):
         """Revalidate the position and commit the journal before the HTTP send."""
-        credentials = self.app.credentials.load(rule['user'])
+        credentials = self.credentials.load(rule['user'])
         if credentials is None:
             raise TradingError('Credentials are missing.')
         rule['check_stage'] = 'checking trading permissions'
@@ -258,7 +259,7 @@ class AutocloseWorker:
             self.finish(rule, 'cancelled', 'your original position closed or reversed before order submission.')
             return
         checkpoint(rule, latest, stamp, fills)
-        if self.app.stop.is_set() or not self.valid(rule) or self.store.cancelled(rule):
+        if self.stop.is_set() or not self.valid(rule) or self.store.cancelled(rule):
             return
         attempt = self.store.prepare(rule, signer, market.order(latest, rule['price']), self.clock())
         if attempt is None:
@@ -311,30 +312,30 @@ class AutocloseWorker:
                 'No new order will be sent until order status and fills establish the outcome.')
 
     def cycle(self):
-        self.app.client.set_trading_priority(True)
+        self.requests.set_trading_priority(True)
         active = self.store.active()
         self.closing_rules = {rule['id'] for rule in active
                               if (rule['state'] == 'closing' or rule.get('close_priority'))
                               and ('pending' in rule or not self.store.cancelled(rule))}
-        self.app.client.sync_close_priorities(self.closing_rules)
-        self.app.client.reserve_for_trading(bool(active))
-        self.app.client.begin_trading_cycle()
+        self.requests.sync_close_priorities(self.closing_rules)
+        self.requests.reserve_for_trading(bool(active))
+        self.requests.begin_trading_cycle()
         self.schedule_next_check(active, delay=0)
         self.api.begin_cycle()
         if not self.closing_rules:
             self.reconcile_terminal_rules()
         for rule in sorted(self.store.active(), key=lambda item: item['id'] not in self.closing_rules):
-            if self.app.stop.is_set():
+            if self.stop.is_set():
                 break
             if self.closing_rules and rule['id'] not in self.closing_rules:
                 continue  # New registrations and idle checks yield to closing.
             self.process_rule(rule)
         active = self.store.active()
-        self.app.client.reserve_for_trading(bool(active))
-        self.app.client.finish_trading_cycle(
+        self.requests.reserve_for_trading(bool(active))
+        self.requests.finish_trading_cycle(
             {rule['id'] for rule in active}
             | {rule['id'] for rule, _ in self.store.unresolved()})
-        self.schedule_next_check(active, delay=self.app.config.poll_interval)
+        self.schedule_next_check(active, delay=self.access.poll_interval)
 
     def schedule_next_check(self, rules, delay):
         # A waiting rule reads own/source positions and then a fill page. Keep
@@ -351,16 +352,16 @@ class AutocloseWorker:
         recurring = sum(25 if rule.get('history_anchor') else 44 for rule in waiting)
         peak = recurring + max((weight - (25 if rule.get('history_anchor') else 44)
                                 for rule, weight in zip(waiting, weights)), default=0)
-        self.app.client.schedule_trading_check(peak, delay,
-                                               interval=self.app.config.poll_interval, recurring=recurring)
+        self.requests.schedule_trading_check(peak, delay,
+                                             interval=self.access.poll_interval, recurring=recurring)
 
     def reconcile_terminal_rules(self):
         # A failed rule can still have an in-flight request. Keep its account
         # fenced until a definitive status is observed, including after restart.
         for rule, active in self.store.unresolved():
-            if active or self.app.stop.is_set():
+            if active or self.stop.is_set():
                 continue
-            self.app.client.set_trading_rule(rule['id'])
+            self.requests.set_trading_rule(rule['id'])
             try:
                 status = self.api.status(rule['address'], rule['pending']['cloid'])
                 if not self.terminal_status(rule, status):
@@ -400,7 +401,7 @@ class AutocloseWorker:
                 continue
 
     def process_rule(self, rule):
-        self.app.client.set_trading_rule(rule['id'])
+        self.requests.set_trading_rule(rule['id'])
         try:
             self.step(rule)
         except DataFetchError as error:
@@ -450,7 +451,7 @@ class AutocloseWorker:
             # One successful poll is not evidence that a rolling-minute budget
             # shortage has ended. Require a full quiet window before rearming.
             rule['budget_notice'] = dict(stage=stage, detail=detail, quiet_until=now + WINDOW_SECONDS)
-        if (changed or not rule.get('check_delay_notified')) and not repeat_budget_warning and rule['user'] in self.app.config.chat_ids:
+        if (changed or not rule.get('check_delay_notified')) and not repeat_budget_warning and self.access.allows_user(rule['user']):
             rule['check_delay_notified'] = True
             rule['check_error_serial'] = rule.get('check_error_serial', 0) + 1
             outcome = ('The submitted order outcome is unknown; no new order will be sent until it is verified.'
@@ -474,9 +475,9 @@ class AutocloseWorker:
             self.finish(rule, 'failed', reason + ' No rule was armed. Please retry /autoclose later.')
             return
         deadline = rule.setdefault('activation_deadline', self.clock() + ACTIVATION_TIMEOUT)
-        delay = max(self.app.config.poll_interval * 2 ** (failures - 1), error.retry_after)
+        delay = max(self.access.poll_interval * 2 ** (failures - 1), error.retry_after)
         rule['activation_retry_at'] = min(deadline, self.clock() + delay)
-        if rule['user'] in self.app.config.chat_ids:
+        if self.access.allows_user(rule['user']):
             self.store.notify(rule,
                 f"Autoclose {rule['ticker']}: {reason} Retrying automatically; the rule is not armed yet.",
                 key=f"autoclose-activation:{rule['id']}:{failures}")
@@ -484,12 +485,12 @@ class AutocloseWorker:
             self.store.save(rule)
 
     def run(self, heartbeat):
-        self.app.client.set_heartbeat(heartbeat)
+        self.requests.set_heartbeat(heartbeat)
         try:
-            while not self.app.stop.is_set():
+            while not self.stop.is_set():
                 heartbeat()
                 self.cycle()
-                self.app.stop.wait(self.app.config.poll_interval)
+                self.stop.wait(self.access.poll_interval)
         except Exception:
             try:
                 for rule in self.store.active():
@@ -502,7 +503,7 @@ class AutocloseWorker:
             # A supervised restart must not let monitoring spend the budget
             # while a known close is still pending. The new cycle restores it
             # from SQLite; only application shutdown releases it unconditionally.
-            if self.app.stop.is_set():
-                self.app.client.reserve_for_trading(False)
-            self.app.client.set_trading_priority(False)
+            if self.stop.is_set():
+                self.requests.reserve_for_trading(False)
+            self.requests.set_trading_priority(False)
             self.api.close()

@@ -266,7 +266,10 @@ class ArmedRuleTests(ApplicationFixture):
         self.app.credentials.save(1, OTHER, KEY)
         self.store = self.app.autoclose_store
         self.exchange = Exchange(self.clock)
-        self.worker = AutocloseWorker(self.app, self.store, self.exchange, self.clock)
+        self.worker = AutocloseWorker(
+            self.store, self.exchange, credentials=self.app.credentials,
+            access=self.app.autoclose_access, requests=self.app.client,
+            stop=self.app.stop, clock=self.clock)
         self.rule = self.store.create(1, WALLET, 'xyz:SPCX', self.app.credentials.version(1))
         self.exchange.market_value = self.exchange.market('xyz:SPCX')
         self.worker.cycle()

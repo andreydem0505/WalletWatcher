@@ -92,7 +92,7 @@ class PersonalWorkerTests(ApplicationFixture):
             self.app.credentials.save(user, WALLET if user == 1 else OTHER, KEY)
             self.my(user)
         self.client.fetch_portfolio.side_effect = [RuntimeError(KEY), snapshot()]
-        with self.assertLogs('walletwatcher.app', level='ERROR') as logs:
+        with self.assertLogs('walletwatcher.services.portfolios', level='ERROR') as logs:
             self.assertTrue(self.app.process_personal_request())
         self.assertTrue(self.app.process_personal_request())
         self.assertFalse(self.app.process_personal_request())

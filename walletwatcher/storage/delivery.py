@@ -111,6 +111,19 @@ class DeliveryQueue:
         with self.lock:
             return self.db.execute('SELECT count(*) FROM outbox').fetchone()[0]
 
+    def diagnostics(self, chat):
+        """Queue counters and delivery waits only; never expose message contents."""
+        with self.lock:
+            now = self.clock()
+            pending, retrying, oldest_due = self.db.execute(
+                'SELECT count(*), COALESCE(sum(attempts > 0), 0), min(due) FROM outbox').fetchone()
+            row = self.db.execute('SELECT due FROM chats WHERE chat=?', (chat,)).fetchone()
+            cooldown = max(0, float(self.get_metadata('telegram_flood_until', 0)) - now)
+            wait = max(0, float(self.get_metadata('telegram_due', 0)) - now,
+                       row[0] - now if row else 0)
+            return dict(pending=pending, retrying=retrying, cooldown=cooldown,
+                        reply_wait=max(wait, cooldown), overdue=max(0, now - oldest_due) if oldest_due is not None else 0)
+
     def _block_until(self, deadline):
         for key in ('telegram_due', 'telegram_flood_until'):
             self._set_metadata(key, max(deadline, float(self.get_metadata(key, 0))))

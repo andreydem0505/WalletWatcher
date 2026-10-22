@@ -440,7 +440,7 @@ class ApplicationTests(unittest.TestCase):
             self.assertNotIn('<>&', job['text'])
 
     def test_command_write_failure_does_not_change_live_state(self):
-        with patch('walletwatcher.app.save_wallets', side_effect=OSError('disk full')):
+        with patch('walletwatcher.services.monitoring.save_wallets', side_effect=OSError('disk full')):
             self.app.handle_message(self.message(f'/addwallet {WALLET}'))
         self.assertFalse(self.app.accounts)
 
@@ -512,7 +512,7 @@ class ApplicationTests(unittest.TestCase):
             return outcome
 
         self.bot.get_updates.side_effect = fetch
-        with patch('walletwatcher.app.time.monotonic', side_effect=lambda: time.perf_counter() * 10000):
+        with patch('time.monotonic', side_effect=lambda: time.perf_counter() * 10000):
             self.app.polling(lambda: None)
         self.assertEqual(self.app.outbox.get_metadata('telegram_offset'), '124')
 

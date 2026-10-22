@@ -17,7 +17,10 @@ class ActivationRetryTests(ApplicationFixture):
         self.app.credentials.save(1, OTHER, KEY)
         self.store = self.app.autoclose_store
         self.exchange = Exchange(self.clock)
-        self.worker = AutocloseWorker(self.app, self.store, self.exchange, self.clock)
+        self.worker = AutocloseWorker(
+            self.store, self.exchange, credentials=self.app.credentials,
+            access=self.app.autoclose_access, requests=self.app.client,
+            stop=self.app.stop, clock=self.clock)
         self.rule = self.store.create(1, WALLET, 'BTC', self.app.credentials.version(1))
 
     def state(self):
@@ -46,7 +49,10 @@ class ActivationRetryTests(ApplicationFixture):
             self.worker.cycle()
         self.assertEqual(self.state()['activation_retry_at'], self.clock() + 61)
         store = AutocloseStore(self.queue, '12345')
-        worker = AutocloseWorker(self.app, store, self.exchange, self.clock)
+        worker = AutocloseWorker(
+            store, self.exchange, credentials=self.app.credentials,
+            access=self.app.autoclose_access, requests=self.app.client,
+            stop=self.app.stop, clock=self.clock)
         self.clock.advance(60)
         with patch.object(self.exchange, 'authority') as query:
             worker.cycle()

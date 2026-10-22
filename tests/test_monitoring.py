@@ -137,7 +137,7 @@ class MonitoringTests(ApplicationFixture):
     def test_success_resets_failure_count_and_sets_next_poll(self):
         account = self.track([])
         account.failures = 5
-        with patch('walletwatcher.app.time.time', return_value=1000), patch('walletwatcher.app.time.monotonic', return_value=200):
+        with patch('time.time', return_value=1000), patch('time.monotonic', return_value=200):
             self.poll(account, [])
         self.assertEqual(account.failures, 0)
         self.assertEqual(account.last_updated, 1000)

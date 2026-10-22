@@ -149,7 +149,10 @@ class WaitingBudgetNoticeTests(ApplicationFixture):
         self.app.credentials.save(1, OTHER, KEY)
         self.store = self.app.autoclose_store
         self.exchange = Exchange(self.clock)
-        self.worker = AutocloseWorker(self.app, self.store, self.exchange, self.clock)
+        self.worker = AutocloseWorker(
+            self.store, self.exchange, credentials=self.app.credentials,
+            access=self.app.autoclose_access, requests=self.app.client,
+            stop=self.app.stop, clock=self.clock)
         self.store.create(1, WALLET, 'BTC', self.app.credentials.version(1))
         self.worker.cycle()
 
@@ -179,7 +182,10 @@ class WaitingBudgetNoticeTests(ApplicationFixture):
         self.clock.advance(5)
         self.worker.cycle()
         store = AutocloseStore(self.queue, '12345')
-        self.worker = AutocloseWorker(self.app, store, self.exchange, self.clock)
+        self.worker = AutocloseWorker(
+            store, self.exchange, credentials=self.app.credentials,
+            access=self.app.autoclose_access, requests=self.app.client,
+            stop=self.app.stop, clock=self.clock)
         self.fail_history()
         self.assertEqual(len(self.jobs()), before)
         self.fail_history('timeout')

@@ -1,70 +1,9 @@
-"""Fresh personal account snapshots and their Telegram HTML presentation."""
-from dataclasses import dataclass, field
+"""Portfolio HTML presentation with compatibility exports for existing callers."""
 from html import escape
-from typing import Optional
 
-from walletwatcher.presentation.formatting import format_position, label, number
-from walletwatcher.domain.models import Position
-
-
-@dataclass
-class PersonalPosition:
-    position: Position
-    margin: float
-    current_price: str
-    roe: Optional[float]
-    funding: Optional[float]
-    take_profit: list[str] = field(default_factory=list)
-    stop_loss: list[str] = field(default_factory=list)
-
-
-@dataclass
-class Portfolio:
-    balance: float
-    positions: list[PersonalPosition]
-
-
-def parse_positions(state, prices, orders):
-    if not isinstance(state['assetPositions'], list) or not isinstance(orders, list):
-        raise ValueError('Invalid positions or orders')
-    result = []
-    for item in state['assetPositions']:
-        pos = format_position(item)
-        if pos.size == 0:
-            continue
-        data = item['position']
-        margin = number(data['marginUsed'])
-        if margin < 0 or pos.leverage <= 0:
-            raise ValueError('Invalid margin or leverage')
-        current = label(str(prices[pos.ticker]))
-        if number(current) <= 0:
-            raise ValueError('Invalid mark price')
-        raw_roe = data.get('returnOnEquity')
-        roe = number(raw_roe) if raw_roe is not None else (pos.pnl / margin if margin else None)
-        if roe is not None:
-            number(roe * 100)
-        funding = data.get('cumFunding', {}).get('sinceOpen')
-        # Hyperliquid accumulates funding costs: positive = paid, negative = received.
-        # Present the account's cash flow, with expenses negative and income positive.
-        personal = PersonalPosition(pos, margin, current, roe,
-                                    -number(funding) if funding is not None else None)
-        for order in orders:
-            if (order.get('coin') != pos.ticker or order.get('isTrigger') is not True
-                    or not (order.get('reduceOnly') is True or order.get('isPositionTpsl') is True)
-                    or order.get('side') != ('A' if pos.size > 0 else 'B')):
-                continue
-            kind = str(order.get('orderType', '')).lower()
-            target = personal.take_profit if kind.startswith('take profit') else (
-                personal.stop_loss if kind.startswith('stop') else None)
-            if target is None:
-                continue
-            price = label(str(order['triggerPx']))
-            if number(price) <= 0:
-                raise ValueError('Invalid trigger price')
-            if price not in target:
-                target.append(price)
-        result.append(personal)
-    return result
+# Compatibility exports; models and parsing no longer live in presentation.
+from walletwatcher.domain.portfolio import PersonalPosition, Portfolio
+from walletwatcher.hyperliquid.parsing import parse_positions
 
 
 def money(value, *, signed=False):
