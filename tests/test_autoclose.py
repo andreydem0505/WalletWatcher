@@ -396,8 +396,9 @@ class RuleTests(ApplicationFixture):
             self.assertTrue(entered.wait(2))
             self.command('/my')
             self.assertFalse(self.app.personal_queue.empty())
+            before_help = len(self.jobs())
             self.app._command(1, '/help')
-            self.assertIn('/autoclose', self.jobs()[-1]['text'])
+            self.assertIn('/autoclose', ''.join(job['text'] for job in self.jobs()[before_help:]))
             self.command(f'/cancelautoclose {WALLET} BTC')
         finally:
             release.set()

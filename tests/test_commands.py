@@ -12,20 +12,23 @@ class CommandBehaviorTests(ApplicationFixture):
     def test_help_explains_all_commands_and_replies_only_to_requesting_chat(self):
         self.app.config = replace(self.config, mode='TEST')
         for command in ('/help', '/HELP@wallet_bot'):
+            before = len(self.jobs())
             self.app.handle_message(self.message(command, chat=2))
-            job = self.jobs()[-1]
-            self.assertEqual(job['chat'], 2)
-            self.assertFalse(job['html'])  # Argument placeholders remain literal text.
+            jobs = self.jobs()[before:]
+            text = ''.join(job['text'] for job in jobs)
+            self.assertTrue(jobs)
+            self.assertTrue(all(job['chat'] == 2 for job in jobs))
+            self.assertTrue(all(not job['html'] for job in jobs))  # Literal argument placeholders.
             for syntax in ('/addwallet <address>', '/removewallet <address>',
-                           '/settag <address> <tag>', '/creds <address> <private_key>', '/my'):
-                self.assertIn(syntax, job['text'])
-            self.assertNotIn('/help', job['text'])
-            self.assertNotRegex(job['text'], '[А-Яа-яЁё]')
-            self.assertIn('Only available in a private chat', job['text'])
-            self.assertIn('up to 100 characters', job['text'])
-            self.assertIn('Any other message', job['text'])
-            self.assertLessEqual(len(job['text']), 1500)
-        self.assertEqual(len(self.jobs()), 2)
+                           '/settag <address> <tag>', '/creds <address> <private_key>', '/my',
+                           '/intersections'):
+                self.assertIn(syntax, text)
+            self.assertNotIn('/help', text)
+            self.assertNotRegex(text, '[А-Яа-яЁё]')
+            self.assertIn('Only available in a private chat', text)
+            self.assertIn('up to 100 characters', text)
+            self.assertIn('Any other message', text)
+            self.assertTrue(all(len(job['text']) <= 1500 for job in jobs))
         self.assertFalse(self.config.wallets_file.exists())
         self.assertTrue(self.app.personal_queue.empty())
         self.client.fetch_portfolio.assert_not_called()

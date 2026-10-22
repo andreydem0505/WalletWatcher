@@ -155,6 +155,8 @@ Commands:
 - `/autoclose <wallet> <ticker>` (private chat only)
 - `/cancelautoclose <wallet> <ticker>` (private chat only)
 - `/autocloses` — list your active rules (private chat only, no arguments).
+- `/intersections` — list positions in tickers held by at least two tracked
+  wallets (no arguments).
 - Any other text shows wallets, per-wallet last successful update, failure
   counts and the number of queued notifications.
 
@@ -164,6 +166,20 @@ Wallet lists start with `Wallets: <count>` and follow the order of tracked walle
 in `wallets.txt`, including manual reordering while the bot is running. Wallet
 commands preserve that order; new wallets are appended at the end. If the file
 cannot be read, the list uses the current in-memory order.
+
+`/intersections` groups exact full tickers alphabetically, including HIP-3 names
+such as `xyz:SPCX`. Long and short positions in the same ticker count together;
+`BTC` and `xyz:BTC` are separate instruments. Wallets within each ticker follow
+the file order. Each block contains the tag (when present), a copyable address,
+and the same four position lines as alerts: position title, Volume, Entry Price
+and P&L, including existing position annotations. Blank lines separate blocks.
+Long reports split between complete blocks without dropping positions.
+
+The command uses the last snapshots collected by ordinary monitoring and sends
+no additional exchange requests. Prices and P&L follow the existing monitor
+refresh rules. Wallets without a first successful snapshot are excluded with a
+notice. Authorized private and group chats can request the report without
+personal credentials; it is sent only to the requesting chat.
 
 ### Personal account commands
 

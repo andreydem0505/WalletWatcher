@@ -99,6 +99,7 @@ HTTP, Telegram или SDK. Обработчик торговли использ�
 
 - `/addwallet <address>`, `/removewallet <address>`, `/settag <address> <tag>`.
 - `/creds <address> <private_key>`, `/my`.
+- `/intersections` — общие тикеры открытых позиций отслеживаемых кошельков.
 - `/autoclose <wallet> <ticker>`, `/cancelautoclose <wallet> <ticker>`, `/autocloses`.
 - `/help` открывает английскую справку, которая не перечисляет саму `/help`.
   Другой текст выводит статус мониторинга и список кошельков.
@@ -130,6 +131,14 @@ Credentials и правила принадлежат Telegram-пользоват
   адреса копируются как inline code, тег находится на отдельной строке,
   после `Last success` есть пустая строка-разделитель.
 - Даты: МСК, `YYYY-MM-DD HH:MM:SS`, без миллисекунд и надписи часового пояса.
+- `/intersections` использует сохранённые снимки мониторинга, не запрашивает биржу
+  и не меняет состояние/группировку алертов. Полные тикеры группируются по алфавиту,
+  внутри — кошельки в порядке файла; Long/Short учитываются вместе, требуется
+  минимум два разных кошелька. Тег (если есть), копируемый адрес и прежние четыре
+  строки позиции выводятся отдельным блоком. Формат позиции общий с алертами
+  (`position_block`); не теряй корону, стрелку плеча и дельты. Кошельки без снимка
+  исключаются с пояснением, длинный ответ делится только между блоками. Команда
+  доступна в разрешённых чатах без credentials и отвечает только запросившему чату.
 
 **Известные ограничения — не потеряй их из виду:** обычный мониторинг сравнивает
 снимки и отображает последнее подходящее исполнение. Полное закрытие и
@@ -297,7 +306,7 @@ python3.12 -m venv /tmp/walletwatcher-tests
 
 - Мониторинг, группировка и формат: `test_monitoring.py`, `test_models.py`,
   `test_formatting.py`, `test_max_leverage.py`, `test_known_limitations.py`.
-- Команды и списки: `test_commands.py`, `test_autoclose_list.py`, `test_components.py`.
+- Команды и списки: `test_commands.py`, `test_autoclose_list.py`, `test_intersections.py`, `test_components.py`.
 - `/my`: `test_personal_accounts.py`, `test_personal_concurrency.py`,
   `test_websocket_snapshot.py`.
 - Торговля: `test_autoclose.py`, `test_autoclose_activation.py`,

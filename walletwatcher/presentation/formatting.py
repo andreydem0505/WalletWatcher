@@ -55,6 +55,26 @@ def format_trade(data: dict) -> Trade:
     return Trade(label(data['coin']), label(str(data['px'])), label(str(data['sz'])), label(data['dir']), timestamp)
 
 
+def position_block(pos: Position, previous=None) -> str:
+    """The four position lines shared by trade alerts and intersections."""
+    leverage = (f'{previous.leverage:g}× → {pos.leverage:g}×'
+                if previous is not None and previous.leverage != pos.leverage
+                else f'{pos.leverage:g}')
+    change = ' 🆕' if pos.is_new else (
+        f' ({"+" if pos.delta > 0 else "-"}${format_number(abs(pos.delta))}) 👈'
+        if pos.delta else ''
+    )
+    if pos.max_leverage is not None and pos.leverage == pos.max_leverage:
+        change = change + '👑' if pos.is_new else ' 👑' + change
+    return (
+        f'<b>{escape(pos.ticker)} {escape(pos.direction)} '
+        f'{leverage} {escape(pos.leverage_type)}</b>\n'
+        f'Volume: ${format_number(pos.volume)}{change}\n'
+        f'Entry Price: {escape(pos.entry_price) if pos.entry_price is not None else "N/A"}\n'
+        f'P&amp;L: {"+" if pos.pnl >= 0 else "-"}${format_number(abs(pos.pnl))}'
+    )
+
+
 def on_change_message(wallet: str, account: Account) -> str:
     trade = account.last_trade
     if trade is None:
@@ -71,22 +91,7 @@ def on_change_message(wallet: str, account: Account) -> str:
     blocks = []
     for pos in account.positions or []:
         previous = account.snapshot.get(pos.key)
-        leverage = (f'{previous.leverage:g}× → {pos.leverage:g}×'
-                    if previous is not None and previous.leverage != pos.leverage
-                    else f'{pos.leverage:g}')
-        change = ' 🆕' if pos.is_new else (
-            f' ({"+" if pos.delta > 0 else "-"}${format_number(abs(pos.delta))}) 👈'
-            if pos.delta else ''
-        )
-        if pos.max_leverage is not None and pos.leverage == pos.max_leverage:
-            change = change + '👑' if pos.is_new else ' 👑' + change
-        blocks.append(
-            f'\n<b>{escape(pos.ticker)} {escape(pos.direction)} '
-            f'{leverage} {escape(pos.leverage_type)}</b>\n'
-            f'Volume: ${format_number(pos.volume)}{change}\n'
-            f'Entry Price: {escape(pos.entry_price) if pos.entry_price is not None else "N/A"}\n'
-            f'P&amp;L: {"+" if pos.pnl >= 0 else "-"}${format_number(abs(pos.pnl))}\n'
-        )
+        blocks.append('\n' + position_block(pos, previous) + '\n')
     blocks.extend(f'\n<b>{escape(ticker)} Position Closed</b> ❌\n' for ticker in account.closed_positions)
     text = header
     for index, block in enumerate(blocks):

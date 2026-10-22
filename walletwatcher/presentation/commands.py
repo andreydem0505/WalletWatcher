@@ -20,6 +20,8 @@ HELP_TEXT = (
     '/cancelautoclose <wallet> <ticker> — cancel your rule. Already submitted orders '
     'may still execute. Use full HIP-3 tickers such as xyz:EWZ.\n\n'
     '/autocloses — your active rules; private chat only.\n\n'
+    '/intersections — open positions in tickers shared by tracked wallets, '
+    'using the latest monitoring snapshots. No arguments.\n\n'
     '<address> — a wallet address starting with 0x; for /creds, use the trading '
     'account address, not the API wallet address.\n'
     '<private_key> — the API/agent wallet private key, not your main wallet key.\n'

@@ -22,6 +22,7 @@ from walletwatcher.presentation.formatting import on_change_message
 from walletwatcher.domain.models import Account, TradeAction
 from walletwatcher.presentation.portfolio import portfolio_messages
 from walletwatcher.presentation.commands import HELP_TEXT, autoclose_messages, monitoring_messages
+from walletwatcher.presentation.intersections import intersection_messages
 from walletwatcher.infrastructure.runtime import InstanceLock, WorkerSupervisor, configure_logging, in_docker, redact_secrets
 from walletwatcher.storage.wallets import load_accounts, normalize_wallet, save_wallets, validate_tag
 
@@ -243,6 +244,14 @@ class Application:
             if len(args) != 1:
                 raise ValueError('Usage: /help')
             self.reply(chat, HELP_TEXT)
+            return
+        if command == '/intersections':
+            if len(args) != 1:
+                raise ValueError('Usage: /intersections')
+            with self.lock:
+                messages = intersection_messages(self._accounts_in_file_order())
+            for message in messages:
+                self.outbox.enqueue(chat, message, html=True)
             return
         if command in ('/addwallet', '/removewallet', '/settag'):
             self._wallet_command(chat, command, args)
