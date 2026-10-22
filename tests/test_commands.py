@@ -16,12 +16,13 @@ class CommandBehaviorTests(ApplicationFixture):
             self.app.handle_message(self.message(command, chat=2))
             jobs = self.jobs()[before:]
             text = ''.join(job['text'] for job in jobs)
-            self.assertTrue(jobs)
+            self.assertEqual(len(jobs), 1)
             self.assertTrue(all(job['chat'] == 2 for job in jobs))
             self.assertTrue(all(not job['html'] for job in jobs))  # Literal argument placeholders.
             for syntax in ('/addwallet <address>', '/removewallet <address>',
                            '/settag <address> <tag>', '/creds <address> <private_key>', '/my',
-                           '/intersections'):
+                           '/autoclose <wallet> <ticker>', '/cancelautoclose <wallet> <ticker>',
+                           '/autocloses', '/intersections'):
                 self.assertIn(syntax, text)
             self.assertNotIn('/help', text)
             self.assertNotRegex(text, '[А-Яа-яЁё]')
