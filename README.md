@@ -255,7 +255,20 @@ The worker has its own HTTP session and shares the application's IP rate budget.
 Wallet/DEX snapshots are shared between rules within a cycle; a fresh user
 snapshot is mandatory immediately before each order.
 While rules are waiting for their source trigger, monitoring and `/my` can use
-all unused capacity in the shared 1000-unit rolling-minute request-weight budget.
+spare capacity in the shared 1000-unit rolling-minute request-weight budget.
+Before admitting ordinary traffic, the limiter forecasts scheduled autoclose
+checks until the proposed request expires from the rolling window. It protects
+a complete waiting-rule check (two position snapshots plus the maximum fill-page
+weight), including bootstrap history if no
+saved anchor exists. Weight expiring before that deadline remains available now.
+This avoids monitoring consuming the capacity needed for the next poll, without
+lengthening `POLL_INTERVAL` or skipping position lifecycle checks. With a saved
+anchor, one protected check needs at least 124 weight units. Repeated checks use
+their observed response weights, with a floor for a quiet cycle (25 per anchored
+rule); the forecast retains headroom for one maximum-size reservation. The
+estimate rises and falls with actual cycle costs, the polling interval and the
+active rules. It is not a charge or a permanently separate quota. A deliberate
+monitor pause does not increase wallet failure counters or backoff.
 If a trading request cannot fit, its required weight is dynamically protected
 from ordinary requests until it is admitted or no longer needed. Other free
 capacity remains available to monitoring. Smaller trading requests do not clear
@@ -264,6 +277,13 @@ Already spent weight cannot be reclaimed: trading may still wait for earlier
 requests to leave the rolling window. The total never exceeds 1000. Local budget
 refusal delays only the request that does not fit; a genuine HTTP 429 still
 blocks every worker for `Retry-After`.
+
+The first waiting-rule budget shortage is reported immediately. Repeated failures
+at the same stage belong to one incident until a full 60 seconds pass without
+that shortage, even if individual checks succeed in between. This marker survives
+restarts. Different failure stages or causes are reported; failures after a source
+trigger or during order submission/confirmation retain immediate notifications.
+Waiting-rule notices explicitly say that no close order has been submitted.
 
 As soon as a source trigger is observed, closing becomes exclusive: ordinary
 REST requests (monitoring and `/my`) and idle/queued autoclose checks pause.

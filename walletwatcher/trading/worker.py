@@ -7,6 +7,7 @@ from decimal import Decimal
 from typing import Callable
 
 from walletwatcher.hyperliquid.errors import DataFetchError
+from walletwatcher.hyperliquid.rate_limit import REQUEST_WEIGHTS, WINDOW_SECONDS
 from walletwatcher.trading.api import TradingAPI
 from walletwatcher.trading.gateway import TradingGateway
 from walletwatcher.trading.policy import (
@@ -317,6 +318,8 @@ class AutocloseWorker:
                               and ('pending' in rule or not self.store.cancelled(rule))}
         self.app.client.sync_close_priorities(self.closing_rules)
         self.app.client.reserve_for_trading(bool(active))
+        self.app.client.begin_trading_cycle()
+        self.schedule_next_check(active, delay=0)
         self.api.begin_cycle()
         if not self.closing_rules:
             self.reconcile_terminal_rules()
@@ -326,10 +329,30 @@ class AutocloseWorker:
             if self.closing_rules and rule['id'] not in self.closing_rules:
                 continue  # New registrations and idle checks yield to closing.
             self.process_rule(rule)
-        self.app.client.reserve_for_trading(bool(self.store.active()))
+        active = self.store.active()
+        self.app.client.reserve_for_trading(bool(active))
         self.app.client.finish_trading_cycle(
-            {rule['id'] for rule in self.store.active()}
+            {rule['id'] for rule in active}
             | {rule['id'] for rule, _ in self.store.unresolved()})
+        self.schedule_next_check(active, delay=self.app.config.poll_interval)
+
+    def schedule_next_check(self, rules, delay):
+        # A waiting rule reads own/source positions and then a fill page. Keep
+        # enough capacity for one complete pass, not just its largest request:
+        # otherwise the next pass can spend 4 of the protected 120 units first.
+        waiting = [rule for rule in rules if rule['state'] == 'armed' and not self.store.cancelled(rule)]
+        weights = [2 * REQUEST_WEIGHTS['clearinghouseState'] + REQUEST_WEIGHTS['userFillsByTime']
+                   + (0 if rule.get('history_anchor') else REQUEST_WEIGHTS['userFills'])
+                   for rule in waiting]
+        # Even a quiet cycle spends weight. Protect recurring checks throughout
+        # the rolling window, using observed response weights when larger.
+        # 25 = two snapshots (4) + a page retaining an anchor (21).
+        # Without an anchor, two empty history responses cost at least 40 + 4.
+        recurring = sum(25 if rule.get('history_anchor') else 44 for rule in waiting)
+        peak = recurring + max((weight - (25 if rule.get('history_anchor') else 44)
+                                for rule, weight in zip(waiting, weights)), default=0)
+        self.app.client.schedule_trading_check(peak, delay,
+                                               interval=self.app.config.poll_interval, recurring=recurring)
 
     def reconcile_terminal_rules(self):
         # A failed rule can still have an in-flight request. Keep its account
@@ -412,17 +435,28 @@ class AutocloseWorker:
         stage = rule.get('check_stage', 'checking account data')
         detail = error.diagnostic()
         previous = rule.get('last_check_error', {})
-        changed = (previous.get('stage'), previous.get('detail')) != (stage, detail)
+        closing = bool(rule.get('close_priority') or rule['state'] == 'closing' or 'pending' in rule)
+        changed = (previous.get('stage'), previous.get('detail'), previous.get('closing', False)) != (stage, detail, closing)
         if changed or now >= rule.get('check_error_logged_at', 0) + 60:
             logger.warning('Autoclose rule %s delayed while %s: %s', rule['id'], stage, detail)
             rule['check_error_logged_at'] = now
-        rule['last_check_error'] = dict(at=now, stage=stage, detail=detail)
+        rule['last_check_error'] = dict(at=now, stage=stage, detail=detail, closing=closing)
         rule.setdefault('check_error_since', now)
-        if (changed or not rule.get('check_delay_notified')) and rule['user'] in self.app.config.chat_ids:
+        repeat_budget_warning = False
+        if error.reason == 'budget' and not closing:
+            previous_budget = rule.get('budget_notice', {})
+            repeat_budget_warning = ((previous_budget.get('stage'), previous_budget.get('detail')) == (stage, detail)
+                                     and now < previous_budget.get('quiet_until', 0))
+            # One successful poll is not evidence that a rolling-minute budget
+            # shortage has ended. Require a full quiet window before rearming.
+            rule['budget_notice'] = dict(stage=stage, detail=detail, quiet_until=now + WINDOW_SECONDS)
+        if (changed or not rule.get('check_delay_notified')) and not repeat_budget_warning and rule['user'] in self.app.config.chat_ids:
             rule['check_delay_notified'] = True
             rule['check_error_serial'] = rule.get('check_error_serial', 0) + 1
             outcome = ('The submitted order outcome is unknown; no new order will be sent until it is verified.'
                        if 'pending' in rule else 'Automatic retries continue. Position closure is not confirmed.')
+            if not closing:
+                outcome = 'The rule remains active. No close order has been submitted. Automatic retries continue.'
             self.store.notify(rule, f"Autoclose {rule['ticker']}: checks are delayed while {stage}: {detail}. "
                               + outcome,
                               key=f"autoclose-delay:{rule['id']}:{rule['check_error_serial']}")

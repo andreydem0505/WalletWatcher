@@ -65,6 +65,12 @@ class HyperliquidClient:
     def sync_close_priorities(self, rule_ids):
         self.budget.sync_close_priorities(rule_ids)
 
+    def begin_trading_cycle(self):
+        self.budget.begin_trading_cycle()
+
+    def schedule_trading_check(self, weight, delay, **forecast):
+        self.budget.schedule_trading_check(weight, delay, **forecast)
+
     retry_delay = staticmethod(retry_delay)
 
     def _reserve_weight(self, request_type):

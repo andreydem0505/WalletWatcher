@@ -34,7 +34,7 @@ def retry_delay(value):
 
 
 class RequestBudget:
-    """Atomically admit requests and protect only pending trading demand.
+    """Atomically admit requests and protect pending and scheduled trading demand.
 
     Reservations remain mutable so response-dependent fill weights can be
     corrected while concurrent HTTP requests share the same rolling window.
@@ -47,6 +47,7 @@ class RequestBudget:
         self.worker = threading.local()
         self.calls = deque()
         self.trading_waiters = {}
+        self.scheduled_checks = {}
         self.closing_rules = set()
         self.blocked_until = 0.0
 
@@ -66,6 +67,29 @@ class RequestBudget:
         if not enabled:
             with self.lock:
                 self.trading_waiters.pop(threading.current_thread(), None)
+                self.scheduled_checks.pop(threading.current_thread(), None)
+
+    def begin_trading_cycle(self):
+        self.worker.cycle_calls = []
+
+    def schedule_trading_check(self, weight, delay, *, interval=WINDOW_SECONDS, recurring=0):
+        """Forecast recurring checks before admitting ordinary traffic.
+
+        Weight expiring before the check's deadline is available to ordinary
+        requests now. This is a forecast, not a charge or a fixed budget split.
+        """
+        with self.lock:
+            owner = threading.current_thread()
+            if weight:
+                observed = getattr(self.worker, 'last_cycle_weight', 0)
+                if delay:
+                    observed = sum(call[1] for call in getattr(self.worker, 'cycle_calls', []))
+                    self.worker.last_cycle_weight = observed
+                expected = max(recurring, observed)
+                peak = expected + max(0, weight - recurring)
+                self.scheduled_checks[owner] = (self.clock() + delay, peak, max(1, interval), expected)
+            else:
+                self.scheduled_checks.pop(owner, None)
 
     def set_trading_rule(self, rule_id):
         self.worker.trading_rule = rule_id
@@ -84,10 +108,11 @@ class RequestBudget:
         self.worker.trading_rule = None
 
     def reserve_for_trading(self, enabled):
-        # Active rules alone do not withhold capacity from monitoring.
+        # The worker declares scheduled demand separately; no fixed split.
         if not enabled:
             with self.lock:
                 self.trading_waiters.clear()
+                self.scheduled_checks.clear()
                 self.closing_rules.clear()
 
     def reserve(self, operation):
@@ -114,6 +139,8 @@ class RequestBudget:
         total = sum(call[1] for call in self.calls)
         if priority:
             self._update_trading_demand(operation, weight, total)
+        else:
+            self._protect_scheduled_checks(operation, now, weight)
         # One worker makes sequential requests, so protect its largest pending
         # operation rather than summing all the stages it may retry.
         reserve = 0 if priority else sum(max(pending.values()) for pending in self.trading_waiters.values())
@@ -124,7 +151,25 @@ class RequestBudget:
                                  submitted=False)
         reservation = [now, weight, priority]
         self.calls.append(reservation)
+        if priority and hasattr(self.worker, 'cycle_calls'):
+            self.worker.cycle_calls.append(reservation)
         return reservation
+
+    def _protect_scheduled_checks(self, operation, now, weight):
+        for due, peak, interval, recurring in self.scheduled_checks.values():
+            deadline = max(now, due)
+            prior_checks = 0
+            # Protect each deadline until this proposed request expires. Earlier
+            # checks consume their observed weight; the current one needs room
+            # for its full reservation even when responses are usually small.
+            while deadline < now + WINDOW_SECONDS:
+                projected = sum(used for stamp, used, _ in self.calls if stamp > deadline - WINDOW_SECONDS)
+                if projected + weight + peak + prior_checks * recurring > self.limit:
+                    raise DataFetchError('Capacity is needed for scheduled autoclose checks; ordinary requests are paused',
+                                         operation=operation, reason='trading_capacity',
+                                         retry_after=max(1, due - now), submitted=False)
+                prior_checks += 1
+                deadline += interval
 
     def _update_trading_demand(self, operation, weight, total):
         owner = threading.current_thread()

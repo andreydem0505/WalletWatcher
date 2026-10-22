@@ -16,6 +16,7 @@ class DataFetchError(Exception):
         # Never include response bodies, request payloads, URLs or exception text.
         reasons = {'budget': 'the bot request budget is busy',
                    'trading_priority': 'another automatic position close has priority',
+                   'trading_capacity': 'capacity is needed for the next autoclose check',
                    'worker_failure': 'the autoclose worker was interrupted; supervised restart is pending',
                    'rate_limit': 'Hyperliquid rate limiting is active',
                    'timeout': 'the Hyperliquid request timed out',

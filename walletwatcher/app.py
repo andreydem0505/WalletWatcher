@@ -336,7 +336,7 @@ class Application:
                 try:
                     self.poll_wallet(wallet, account)
                 except Exception as error:
-                    if isinstance(error, DataFetchError) and error.reason == 'trading_priority':
+                    if isinstance(error, DataFetchError) and error.reason in ('trading_priority', 'trading_capacity'):
                         break  # A deliberate pause must not increase wallet failure backoff.
                     with self.lock:
                         account.failures = min(account.failures + 1, 10)
