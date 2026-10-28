@@ -77,14 +77,14 @@ class CommandPresentationTests(unittest.TestCase):
         accounts = {OTHER: Account(tag='Whale & <BTC>'), WALLET: Account()}
         accounts[OTHER].last_updated = 1000.999
         accounts[OTHER].failures = 2
-        self.assertEqual(monitoring_messages(accounts, 1000.999, 3), [
+        self.assertEqual(monitoring_messages(accounts, 1000.999, 3, now=1001), [
             'Wallets: 2\n'
             'Last monitoring cycle: 1970-01-01 03:16:40\n'
             'Pending notifications: 3\n\n'
             'Tracked wallets:\n'
             f'<code>{OTHER}</code>\nWhale &amp; &lt;BTC&gt;\n'
-            'Last success: 1970-01-01 03:16:40; failures: 2\n\n'
-            f'<code>{WALLET}</code>\nLast success: not yet; failures: 0\n'
+            '❗ Last success: 1970-01-01 03:16:40; failures: 2\n\n'
+            f'<code>{WALLET}</code>\n❗ Last success: not yet; failures: 0\n'
         ])
 
     def test_autoclose_list_preserves_order_and_escapes_complete_rules(self):

@@ -54,7 +54,7 @@ class CommandBehaviorTests(ApplicationFixture):
     def test_empty_status_contains_no_spurious_wallet(self):
         self.app.handle_message(self.message(''))
         self.assertEqual(self.jobs()[0]['text'],
-                         'Wallets: 0\nLast monitoring cycle: not yet\nPending notifications: 0\n\nTracked wallets:')
+                         'Wallets: 0\n❗ Last monitoring cycle: not yet\nPending notifications: 0\n\nTracked wallets:')
 
     def test_status_follows_current_file_order_and_keeps_monitoring_state(self):
         third = '0x' + '1' * 40
@@ -66,7 +66,7 @@ class CommandBehaviorTests(ApplicationFixture):
             text = self.jobs()[-1]['text']
             self.assertTrue(text.startswith('Wallets: 3\n'))
             self.assertEqual(sorted(order, key=lambda wallet: text.index(f'<code>{wallet}</code>')), list(order))
-            self.assertIn(f'<code>{OTHER}</code>\nlive tag\nLast success: not yet; failures: 3', text)
+            self.assertIn(f'<code>{OTHER}</code>\nlive tag\n❗ Last success: not yet; failures: 3', text)
             self.assertIs(self.app.accounts[OTHER], original)
 
     def test_wallet_commands_preserve_file_order_and_append_new_wallets(self):
@@ -155,3 +155,63 @@ class CommandBehaviorTests(ApplicationFixture):
         self.assertEqual(''.join(job['text'] for job in jobs), '<>&' * 1001)
         self.assertEqual([len(job['text']) for job in jobs], [1500, 1500, 3])
         self.assertTrue(all(not job['html'] for job in jobs))
+
+
+class StatusAttentionTests(ApplicationFixture):
+    def setUp(self):
+        super().setUp()
+        self.app.accounts = {WALLET: Account(tag='Whale <BTC>', last_updated=self.clock() - 10)}
+        self.app.last_cycle = self.clock()
+
+    def report(self):
+        before = len(self.jobs())
+        with patch('time.time', self.clock):
+            self.app.handle_message(self.message('any text'))
+        return '\n'.join(job['text'] for job in self.jobs()[before:])
+
+    def test_healthy_status_and_routine_pending_messages_have_no_warning_marker(self):
+        self.queue.enqueue(1, 'private queued reply')
+        self.queue.db.execute('INSERT INTO chats VALUES (?, ?)', (1, self.clock() + 3.1))
+        self.queue.db.commit()
+        text = self.report()
+        self.assertNotIn('❗', text)
+        self.assertIn('Pending notifications: 1', text)
+        self.assertIn(f'<code>{WALLET}</code>\nWhale &lt;BTC&gt;\nLast success:', text)
+        self.assertNotIn('private queued reply', text)
+        self.client.fetch_open_positions.assert_not_called()
+        self.client.fetch_portfolio.assert_not_called()
+
+    def test_only_failing_or_unchecked_wallet_lines_are_marked(self):
+        self.app.accounts[WALLET].failures = 2
+        self.app.accounts[OTHER] = Account()
+        text = self.report()
+        self.assertEqual(text.count('❗'), 2)
+        self.assertIn('❗ Last success: 1970-01-01 05:46:30; failures: 2', text)
+        self.assertIn(f'<code>{OTHER}</code>\n❗ Last success: not yet; failures: 0', text)
+        self.assertTrue(text.startswith('Wallets: 2\nLast monitoring cycle:'))
+
+    def test_stale_data_uses_the_same_configured_threshold_as_health(self):
+        self.app.config = replace(self.config, poll_interval=30)
+        self.app.last_cycle = self.clock() - 90
+        self.app.accounts[WALLET].last_updated = self.clock() - 90
+        self.assertNotIn('❗', self.report())
+        self.clock.advance(0.1)
+        text = self.report()
+        self.assertIn('❗ Last monitoring cycle:', text)
+        self.assertIn('❗ Last success:', text)
+        self.assertNotIn('❗ Pending notifications:', text)
+
+    def test_delivery_retries_cooldown_wait_and_overdue_queue_are_marked(self):
+        cases = (dict(retrying=1), dict(cooldown=1), dict(reply_wait=11), dict(overdue=31))
+        for changes in cases:
+            with self.subTest(changes=changes):
+                diagnostics = dict(pending=2, retrying=0, cooldown=0, reply_wait=0, overdue=0) | changes
+                with patch.object(self.queue, 'diagnostics', return_value=diagnostics):
+                    text = self.report()
+                self.assertIn('❗ Pending notifications: 2', text)
+                self.assertNotIn('❗ Last success:', text)
+
+    def test_delivery_grace_boundaries_are_not_marked(self):
+        diagnostics = dict(pending=2, retrying=0, cooldown=0, reply_wait=10, overdue=30)
+        with patch.object(self.queue, 'diagnostics', return_value=diagnostics):
+            self.assertNotIn('❗', self.report())

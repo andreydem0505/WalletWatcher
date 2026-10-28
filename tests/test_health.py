@@ -135,6 +135,8 @@ class HealthCommandTests(ApplicationFixture):
         self.assertIn('Next position request: available', text)
         self.assertIn('Not started.', text)
         self.assertIn('Health: issues or delays', text)
+        self.assertIn('<b>❗ Health: issues or delays</b>', text)
+        self.assertIn('❗ Not started.', text)
         self.assertNotIn('<b>Telegram</b>', text)
         self.assertNotIn('<b>Hyperliquid', text)
         self.assertNotIn('<b>Your autoclose rules</b>', text)
@@ -162,6 +164,10 @@ class HealthCommandTests(ApplicationFixture):
         self.assertNotIn('monitor: running; heartbeat', text)
         self.assertIn('personal: stalled; heartbeat 181s ago', text)
         self.assertIn('delivery: awaiting restart; heartbeat 4s ago; retry in 2s', text)
+        for line in ('Wallets: 3; never checked: 1', 'Wallets with failures: 1',
+                     'Oldest wallet success:', 'personal: stalled;', 'delivery: awaiting restart;'):
+            self.assertIn('❗ ' + line, text)
+        self.assertNotIn('❗ Last cycle:', text)
         self.assertIn('Portfolio requests queued or running: 1', text)
         self.assertEqual(self.app.accounts[WALLET].failures, 3)
         self.assertEqual(self.app.accounts[OTHER].last_updated, None)
@@ -178,6 +184,8 @@ class HealthCommandTests(ApplicationFixture):
         text = self.report(2)
         self.assertIn('Pending notifications: 2; retrying: 1', text)
         self.assertIn('Delivery cooldown: 20s; this chat wait: 30s', text)
+        self.assertIn('❗ Pending notifications: 2; retrying: 1', text)
+        self.assertIn('❗ Delivery cooldown: 20s; this chat wait: 30s', text)
         self.assertNotIn('private data', text)
         self.assertNotIn('another user data', text)
         self.assertEqual([tuple(row) for row in self.queue.db.execute('SELECT * FROM outbox LIMIT 2')], before)
@@ -196,6 +204,7 @@ class HealthCommandTests(ApplicationFixture):
         text = self.report()
         self.assertIn('Next position request: paused — automatic closing has priority', text)
         self.assertIn('Exchange cooldown: 60s', text)
+        self.assertIn('❗ Exchange cooldown: 60s', text)
         self.assertEqual(self.http.budget.closing_rules, {'rule'})
         self.http.session.post.assert_not_called()
 
@@ -216,6 +225,9 @@ class HealthCommandTests(ApplicationFixture):
         text = self.report()
         self.assertIn('Queued: 1; armed: 1; closing: 0', text)
         self.assertIn('Delayed checks: 2', text)
+        self.assertIn('❗ Delayed checks: 2', text)
+        self.assertIn('❗ <b>BTC</b>', text)
+        self.assertIn('❗ checking your position fill history:', text)
         self.assertIn('checking your position fill history: the bot request budget is busy', text)
         self.assertIn('HTTP 422', text)
         self.assertNotIn('SECRET-OTHER-TICKER', text)
@@ -245,6 +257,7 @@ class HealthCommandTests(ApplicationFixture):
         store.finish(own, 'failed', 'unknown outcome', notify=False)
         self.command()
         self.assertIn('unconfirmed orders: 1', self.report())
+        self.assertIn('❗ unconfirmed orders: 1', self.report())
         self.assertEqual(store.unresolved(), [(own, False)])
 
     def test_long_error_report_splits_safely_and_redacts_secrets(self):
@@ -315,6 +328,7 @@ class HealthCommandTests(ApplicationFixture):
         self.assertIn('Portfolio requests queued or running: 1', text)
         self.assertNotIn('<b>Telegram</b>', text)
         self.assertNotIn('Uptime:', text)
+        self.assertNotIn('❗', text)
 
     def test_normal_autoclose_priority_is_short_and_does_not_signal_an_error(self):
         self.ready()
@@ -329,6 +343,7 @@ class HealthCommandTests(ApplicationFixture):
                 text = self.report(before)
                 self.assertIn('Health: OK', text)
                 self.assertIn('Monitoring: autoclose priority', text)
+                self.assertNotIn('❗', text)
                 self.assertNotIn('<b>Hyperliquid', text)
                 self.assertNotIn('<b>Monitoring</b>', text)
 
@@ -397,6 +412,8 @@ class HealthCommandTests(ApplicationFixture):
         self.assertIn('Health: issues or delays', text)
         self.assertIn('<b>Hyperliquid', text)
         self.assertIn('Weight: 1000/1000 (100%)', text)
+        self.assertIn('❗ Weight: 1000/1000 (100%)', text)
+        self.assertIn('❗ API: 1000/1000', text)
         self.assertNotIn('<b>Monitoring</b>', text)
         self.clock.advance(60)
         self.deliver_pending()

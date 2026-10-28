@@ -205,7 +205,10 @@ class TelegramController:
     def _send_status(self, chat):
         with self.monitoring.lock:
             accounts = self.monitoring.accounts_in_file_order()
-            messages = monitoring_messages(accounts, self.monitoring.last_cycle, self.outbox.pending_count())
+            delivery = self.outbox.diagnostics(chat)
+            messages = monitoring_messages(
+                accounts, self.monitoring.last_cycle, delivery['pending'], now=time.time(),
+                freshness_limit=max(60, 3 * self.config.poll_interval), delivery=delivery)
         for message in messages:
             self.outbox.enqueue(chat, message, html=True)
 

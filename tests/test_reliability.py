@@ -417,7 +417,7 @@ class ApplicationTests(unittest.TestCase):
         self.app.outbox.deliver_once()
         request = self.bot.send_message.call_args.kwargs
         self.assertEqual(request['parse_mode'], 'HTML')
-        self.assertIn(f'<code>{WALLET}</code>\nwhale &lt;&gt;&amp;\nLast success: not yet; failures: 0\n',
+        self.assertIn(f'<code>{WALLET}</code>\nwhale &lt;&gt;&amp;\n❗ Last success: not yet; failures: 0\n',
                       request['text'])
 
     def test_long_wallet_list_preserves_complete_copyable_addresses(self):

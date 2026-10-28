@@ -1,6 +1,9 @@
 """English help and command response formatting, independent of delivery/storage."""
 from datetime import datetime, timezone, timedelta
 from html import escape
+import time
+
+from walletwatcher.presentation.attention import delivery_delayed, mark_attention, stale
 
 HELP_TEXT = (
     'Available commands:\n\n'
@@ -49,13 +52,18 @@ def format_timestamp(timestamp):
     return datetime.fromtimestamp(timestamp, MOSCOW).strftime('%Y-%m-%d %H:%M:%S') if timestamp else 'not yet'
 
 
-def monitoring_messages(accounts, last_cycle, pending_notifications):
-    lines = [f'Wallets: {len(accounts)}', f'Last monitoring cycle: {format_timestamp(last_cycle)}',
-             f'Pending notifications: {pending_notifications}', '', 'Tracked wallets:']
+def monitoring_messages(accounts, last_cycle, pending_notifications, *, now=None, freshness_limit=60, delivery=None):
+    now = time.time() if now is None else now
+    lines = [f'Wallets: {len(accounts)}',
+             mark_attention(f'Last monitoring cycle: {format_timestamp(last_cycle)}', stale(last_cycle, now, freshness_limit)),
+             mark_attention(f'Pending notifications: {pending_notifications}', delivery is not None and delivery_delayed(delivery)),
+             '', 'Tracked wallets:']
     for wallet, account in accounts.items():
         last = format_timestamp(account.last_updated)
         tag = f'\n{escape(account.tag)}' if account.tag else ''
-        lines.append(f'<code>{escape(wallet)}</code>{tag}\nLast success: {last}; failures: {account.failures}\n')
+        status = mark_attention(f'Last success: {last}; failures: {account.failures}',
+                                account.failures or stale(account.last_updated, now, freshness_limit))
+        lines.append(f'<code>{escape(wallet)}</code>{tag}\n{status}\n')
     return html_messages(lines)
 
 

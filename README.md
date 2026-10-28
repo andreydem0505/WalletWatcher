@@ -214,6 +214,10 @@ budget; yielding to scheduled/triggered autoclose alone is normal. Telegram
 details expand for retries, delivery cooldown, chat wait over 10 seconds or a
 notification overdue by more than 30 seconds (age measured from its due time).
 Ordinary short delivery throttling and ready queue entries do not signal errors.
+Both `/health` and the default wallet status mark lines needing attention with
+`❗`: errors, missing/stale checks, request-budget waits and delivery delays.
+Health also marks affected sections and summary counters. Healthy values and
+routine autoclose priority keep their normal appearance.
 Detailed responses include uptime, but omit healthy components' diagnostics. A
 recent monitor cycle alone does not establish that wallet data is fresh.
 
