@@ -212,21 +212,22 @@ class WaitingBudgetNoticeTests(ApplicationFixture):
         self.assertEqual(len(self.jobs()), before + 1)
         self.assertIn('reading your trading account position', self.jobs()[-1]['text'])
 
-    def test_closing_errors_are_not_suppressed_by_the_waiting_budget_window(self):
+    def test_a_successful_check_does_not_rearm_the_same_closing_budget_warning(self):
         self.exchange.source = 0
         before = len(self.jobs())
         self.fail_history()
-        # A successful check reopens notifications, without submitting an order.
+        # A partial recovery is not the end of a recurring budget incident.
         with patch.object(self.worker, 'step'):
             self.worker.process_rule(self.store.active()[0])
         self.fail_history()
-        self.assertEqual(len(self.jobs()), before + 2)
+        self.assertEqual(len(self.jobs()), before + 1)
 
     def test_budget_notice_transaction_failure_leaves_no_suppression_marker(self):
         with patch.object(self.queue, 'enqueue_transaction', side_effect=RuntimeError('full')):
             with self.assertRaises(RuntimeError):
                 self.fail_history()
         self.assertNotIn('budget_notice', self.store.active()[0])
+        self.assertNotIn('budget_notices', self.store.active()[0])
         before = len(self.jobs())
         self.fail_history()
         self.assertEqual(len(self.jobs()), before + 1)

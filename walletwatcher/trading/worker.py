@@ -443,15 +443,10 @@ class AutocloseWorker:
             rule['check_error_logged_at'] = now
         rule['last_check_error'] = dict(at=now, stage=stage, detail=detail, closing=closing)
         rule.setdefault('check_error_since', now)
-        repeat_budget_warning = False
-        if error.reason == 'budget' and not closing:
-            previous_budget = rule.get('budget_notice', {})
-            repeat_budget_warning = ((previous_budget.get('stage'), previous_budget.get('detail')) == (stage, detail)
-                                     and now < previous_budget.get('quiet_until', 0))
-            # One successful poll is not evidence that a rolling-minute budget
-            # shortage has ended. Require a full quiet window before rearming.
-            rule['budget_notice'] = dict(stage=stage, detail=detail, quiet_until=now + WINDOW_SECONDS)
-        if (changed or not rule.get('check_delay_notified')) and not repeat_budget_warning and self.access.allows_user(rule['user']):
+        notify = changed or not rule.get('check_delay_notified')
+        if error.reason == 'budget':
+            notify = not self.repeated_budget_warning(rule, stage, detail, closing, now)
+        if notify and self.access.allows_user(rule['user']):
             rule['check_delay_notified'] = True
             rule['check_error_serial'] = rule.get('check_error_serial', 0) + 1
             outcome = ('The submitted order outcome is unknown; no new order will be sent until it is verified.'
@@ -463,6 +458,27 @@ class AutocloseWorker:
                               key=f"autoclose-delay:{rule['id']}:{rule['check_error_serial']}")
         else:
             self.store.save(rule)
+
+    @staticmethod
+    def repeated_budget_warning(rule, stage, detail, closing, now):
+        """Keep a quiet window per failure context, not just the last stage.
+
+        Fresh checks may fail alternately at the early and final history read.
+        Neither switching stages nor an individual successful check ends that
+        shortage. A trigger, a new attempt or an unknown order outcome does
+        need a separate immediate warning.
+        """
+        context = (stage, detail, closing, rule['attempts'], rule.get('pending', {}).get('cloid'))
+        key = sha256(repr(context).encode()).hexdigest()
+        notices = {key: until for key, until in rule.get('budget_notices', {}).items() if now < until}
+        quiet_until = notices.get(key, 0)
+        # Rules saved before this change have a single waiting-stage marker.
+        legacy = rule.get('budget_notice', {})
+        if not closing and (legacy.get('stage'), legacy.get('detail')) == (stage, detail):
+            quiet_until = max(quiet_until, legacy.get('quiet_until', 0))
+        notices[key] = now + WINDOW_SECONDS
+        rule['budget_notices'] = notices
+        return now < quiet_until
 
     def activation_failed(self, rule, error):
         stage = rule.get('activation_stage', 'loading account data')

@@ -348,12 +348,16 @@ requests to leave the rolling window. The total never exceeds 1000. Local budget
 refusal delays only the request that does not fit; a genuine HTTP 429 still
 blocks every worker for `Retry-After`.
 
-The first waiting-rule budget shortage is reported immediately. Repeated failures
-at the same stage belong to one incident until a full 60 seconds pass without
-that shortage, even if individual checks succeed in between. This marker survives
-restarts. Different failure stages or causes are reported; failures after a source
-trigger or during order submission/confirmation retain immediate notifications.
-Waiting-rule notices explicitly say that no close order has been submitted.
+The first local budget shortage is reported immediately, including during close
+preflight. Each stage/cause and order context has a durable quiet window: the
+same warning can recur after 60 seconds without that failure. Switching between
+already reported stages or an individual successful check does not reopen the
+window. These markers survive restarts, and existing waiting-rule markers remain
+supported. A new stage/cause, source trigger, order attempt or unknown order
+outcome is reported immediately. IOC rejections, partial fills and final results
+are reported separately. Request order, polling frequency, trading priority and
+fresh history validation are unchanged; deduplication does not remove an actual
+budget wait. Waiting-rule notices say that no close order has been submitted.
 
 As soon as a source trigger is observed, closing becomes exclusive: ordinary
 REST requests (monitoring and `/my`) and idle/queued autoclose checks pause.
